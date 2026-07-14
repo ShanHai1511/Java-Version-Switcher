@@ -2,374 +2,451 @@ package gui
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 	"unsafe"
 
+	"gioui.org/app"
+	"gioui.org/font/gofont"
+	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
+	"gioui.org/text"
+	"gioui.org/unit"
+	"gioui.org/widget"
+	"gioui.org/widget/material"
 	"golang.org/x/sys/windows"
 
 	"jvs/core"
 )
 
-var (
-	user32                  = syscall.NewLazyDLL("user32.dll")
-	comctl32                = syscall.NewLazyDLL("comctl32.dll")
-	shell32                 = syscall.NewLazyDLL("shell32.dll")
-	kernel32                = syscall.NewLazyDLL("kernel32.dll")
-	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
-	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
-	procGetMessageW         = user32.NewProc("GetMessageW")
-	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
-	procTranslateMessage    = user32.NewProc("TranslateMessage")
-	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procUpdateWindow        = user32.NewProc("UpdateWindow")
-	procLoadCursorW         = user32.NewProc("LoadCursorW")
-	procMessageBoxW         = user32.NewProc("MessageBoxW")
-	procSendMessageW        = user32.NewProc("SendMessageW")
-	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
-	procDestroyWindow       = user32.NewProc("DestroyWindow")
-	procEnableWindow        = user32.NewProc("EnableWindow")
-	procSetWindowPos        = user32.NewProc("SetWindowPos")
-	procGetModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
-	procInitCommonControlsEx = comctl32.NewProc("InitCommonControlsEx")
-	procSHBrowseForFolderW  = shell32.NewProc("SHBrowseForFolderW")
-	procSHGetPathFromIDListW = shell32.NewProc("SHGetPathFromIDListW")
-)
+type UI struct {
+	Config *core.Config
+	w      *app.Window
+	th     *material.Theme
 
-type App struct {
-	Instance uintptr
-	Hwnd     uintptr
-	ListView uintptr
-	Status   uintptr
-	Btns     [4]uintptr
-
-	Config  *core.Config
-	JDKList []*core.JDKInfo
 	mu      sync.Mutex
+	jdkList []*core.JDKInfo
+	status  string
+	loading bool
+
+	scanBtn  widget.Clickable
+	addBtn   widget.Clickable
+	dlBtn    widget.Clickable
+	swBtn    widget.Clickable
+	list     widget.List
+	selIdx   int
+
+	dlOpen   bool
+	dlSel    widget.Enum
+	dlVers   []string
+	dlCfm    widget.Clickable
+	dlCancel widget.Clickable
+
+	scanCh chan []*core.JDKInfo
+	swCh   chan *core.SwitchResult
 }
 
-var theApp *App
-
-func Run(config *core.Config) error {
-	theApp = &App{Config: config}
-	initCC()
-
-	hinst, _, _ := procGetModuleHandleW.Call(0)
-	theApp.Instance = hinst
-
-	cn := syscall.StringToUTF16Ptr("JVS_Win")
-	wc := struct {
-		Size       uint32
-		Style      uint32
-		WndProc    uintptr
-		ClsExtra   int32
-		WndExtra   int32
-		Instance   uintptr
-		Icon       uintptr
-		Cursor     uintptr
-		Background uintptr
-		MenuName   *uint16
-		ClassName  *uint16
-		IconSm     uintptr
-	}{
-		Size:      uint32(unsafe.Sizeof(struct {
-			Size, Style uint32
-			WndProc     uintptr
-			ClsExtra, WndExtra int32
-			Instance, Icon, Cursor, Background uintptr
-			MenuName, ClassName *uint16
-			IconSm uintptr
-		}{})),
-		WndProc:    syscall.NewCallback(wndProc),
-		Instance:   theApp.Instance,
-		Cursor:     loadCur(32512),
-		Background: 6,
-		ClassName:  cn,
+func Run(cfg *core.Config) error {
+	u := &UI{
+		Config: cfg,
+		status: "就绪",
+		selIdx: -1,
+		scanCh: make(chan []*core.JDKInfo, 1),
+		swCh:   make(chan *core.SwitchResult, 1),
 	}
-	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	u.list.Axis = layout.Vertical
+	go u.loop()
+	app.Main()
+	return nil
+}
 
-	t := syscall.StringToUTF16Ptr("Java Version Switcher")
-	h, _, _ := procCreateWindowExW.Call(
-		0, uintptr(unsafe.Pointer(cn)), uintptr(unsafe.Pointer(t)),
-		0x00CF0000|0x02000000,
-		200, 100, 680, 520, 0, 0, theApp.Instance, 0)
-	if h == 0 {
-		return fmt.Errorf("create window fail")
+func (u *UI) loop() {
+	u.w = new(app.Window)
+	u.w.Option(
+		app.Title("Java Version Switcher"),
+		app.Size(unit.Dp(720), unit.Dp(540)),
+	)
+	u.th = material.NewTheme()
+	u.th.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
+	u.th.Palette = material.Palette{
+		Fg: color.NRGBA{R: 33, G: 33, B: 33, A: 255},
+		Bg: color.NRGBA{R: 250, G: 250, B: 250, A: 255},
+		ContrastBg: color.NRGBA{R: 25, G: 118, B: 210, A: 255},
+		ContrastFg: color.NRGBA{R: 255, G: 255, B: 255, A: 255},
 	}
-	theApp.Hwnd = h
-	procShowWindow.Call(h, 1)
-	procUpdateWindow.Call(h)
-	return loop()
-}
 
-func initCC() {
-	s := struct {
-		Size uint32
-		ICC  uint32
-	}{Size: 8, ICC: 1}
-	procInitCommonControlsEx.Call(uintptr(unsafe.Pointer(&s)))
-}
+	var ops op.Ops
+	go u.startScan()
 
-func loadCur(id uintptr) uintptr {
-	r, _, _ := procLoadCursorW.Call(0, id)
-	return r
-}
-
-func loop() error {
-	var m struct {
-		Hwnd    uintptr
-		Msg     uint32
-		WParam  uintptr
-		LParam  uintptr
-		Time    uint32
-		PtX, PtY int32
-	}
 	for {
-		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
-		if r == 0 {
-			break
+		switch e := u.w.Event().(type) {
+		case app.FrameEvent:
+			gtx := app.NewContext(&ops, e)
+			u.layout(gtx)
+			e.Frame(gtx.Ops)
+		case app.DestroyEvent:
+			return
 		}
-		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
-		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
+}
+
+func (u *UI) layout(gtx layout.Context) {
+	u.handleClicks(gtx)
+	u.checkCh()
+
+	layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.card(gtx) }),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return u.listLayout(gtx) }),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.buttons(gtx) }),
+			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.statusLine(gtx) }),
+		)
+	})
+	if u.dlOpen {
+		u.dialog(gtx)
+	}
+}
+
+func (u *UI) handleClicks(gtx layout.Context) {
+	if u.scanBtn.Clicked(gtx) {
+		go u.startScan()
+	}
+	if u.addBtn.Clicked(gtx) {
+		go u.addJDK()
+	}
+	if u.dlBtn.Clicked(gtx) {
+		u.dlOpen = true
+		u.dlVers = core.ListAvailableVersions()
+	}
+	if u.swBtn.Clicked(gtx) {
+		go u.doSwitch()
+	}
+	if u.dlCfm.Clicked(gtx) && u.dlOpen {
+		u.dlOpen = false
+		go u.download(u.dlSel.Value)
+	}
+	if u.dlCancel.Clicked(gtx) && u.dlOpen {
+		u.dlOpen = false
+	}
+}
+
+func (u *UI) checkCh() {
+	select {
+	case jdks := <-u.scanCh:
+		u.mu.Lock()
+		u.jdkList = jdks
+		u.mu.Unlock()
+		u.loading = false
+		u.status = fmt.Sprintf("就绪 — 共找到 %d 个 JDK", len(jdks))
+		u.w.Invalidate()
+	case r := <-u.swCh:
+		u.loading = false
+		if r.Success {
+			u.status = fmt.Sprintf("切换成功 — 已清理 %d 条旧路径", r.PathCleaned)
+			go u.startScan()
+		} else {
+			u.status = "切换失败: " + r.Error
+		}
+		u.w.Invalidate()
+	default:
+	}
+}
+
+func (u *UI) current() *core.JDKInfo {
+	for _, j := range u.jdkList {
+		if j.IsCurrent {
+			return j
+		}
 	}
 	return nil
 }
 
-func wndProc(h uintptr, m uint32, w, l uintptr) uintptr {
-	switch m {
-	case 0x0001: // WM_CREATE
-		theApp.Hwnd = h
-		createUI(h)
-		go scan()
-		return 0
-	case 0x0005: // WM_SIZE
-		onSize(l)
-		return 0
-	case 0x0111: // WM_COMMAND
-		onCmd(w)
-		return 0
-	case 0x004E: // WM_NOTIFY
-		onNotify(l)
-		return 0
-	case 0x0010: // WM_CLOSE
-		procDestroyWindow.Call(h)
-		return 0
-	case 0x0002: // WM_DESTROY
-		procPostQuitMessage.Call(0)
-		return 0
+func (u *UI) card(gtx layout.Context) layout.Dimensions {
+	u.mu.Lock()
+	cur := u.current()
+	u.mu.Unlock()
+
+	title := "当前未选择"
+	sub := "点击下方列表中的 JDK 后点击 [切换]"
+	col := color.NRGBA{R: 150, G: 150, B: 150, A: 255}
+	if cur != nil {
+		title = fmt.Sprintf("✓  JDK %s  %s", cur.Version, cur.Vendor)
+		sub = cur.Path
+		col = color.NRGBA{R: 56, G: 142, B: 60, A: 255}
 	}
-	r, _, _ := procDefWindowProcW.Call(h, uintptr(m), w, l)
-	return r
-}
 
-func createUI(h uintptr) {
-	gap := uintptr(12)
-	bw := uintptr(110)
-	bh := uintptr(30)
-
-	lh := uintptr(350)
-	ly := gap + 40
-	by := ly + lh + gap
-
-	// listview
-	theApp.ListView = createCtrl(h, "SysListView32", "",
-		0x40000000|0x10000000|0x00010000|0x0001|0x0004|0x0008,
-		gap, ly, 640, lh, 201)
-
-	addCol(theApp.ListView, 0, "版本 · 厂商", 300)
-	addCol(theApp.ListView, 1, "安装路径", 330)
-
-	// buttons
-	theApp.Btns[0] = createCtrl(h, "Button", "扫描", 0x40000000|0x10000000|0x00010000, gap, by, bw, bh, 102)
-	theApp.Btns[1] = createCtrl(h, "Button", "添加", 0x40000000|0x10000000|0x00010000, gap*2+bw, by, bw, bh, 103)
-	theApp.Btns[2] = createCtrl(h, "Button", "下载", 0x40000000|0x10000000|0x00010000, gap*3+bw*2, by, bw, bh, 104)
-	theApp.Btns[3] = createCtrl(h, "Button", "切换", 0x40000000|0x10000000|0x00010000, gap*4+bw*3, by, 100, bh, 101)
-
-	// status
-	theApp.Status = createCtrl(h, "Static", "就绪", 0x40000000|0x10000000, gap, by+bh+gap, 640, 22, 202)
-}
-
-func createCtrl(parent uintptr, cls, text string, style uintptr, x, y, w, h uintptr, id int) uintptr {
-	var tp *uint16
-	if text != "" {
-		tp = syscall.StringToUTF16Ptr(text)
+	border := widget.Border{
+		Color: color.NRGBA{R: 224, G: 224, B: 224, A: 255},
+		CornerRadius: unit.Dp(8),
+		Width: unit.Dp(1),
 	}
-	r, _, _ := procCreateWindowExW.Call(
-		0,
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(cls))),
-		uintptr(unsafe.Pointer(tp)),
-		style|0x00020000, // WS_EX_STATICEDGE for list
-		x, y, w, h,
-		parent, uintptr(id), theApp.Instance, 0)
-	return r
+	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Background{}.Layout(gtx,
+			func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							l := material.Label(u.th, unit.Sp(15), title)
+							l.Color = col
+							l.Font.Weight = 700
+							return l.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							l := material.Label(u.th, unit.Sp(12), sub)
+							l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+							return l.Layout(gtx)
+						}),
+					)
+				})
+			})
+	})
 }
 
-func addCol(lv uintptr, idx int, text string, w int32) {
-	c := struct {
-		Mask       uint32
-		Fmt        int32
-		Cx         int32
-		PszText    *uint16
-		CchTextMax int32
-	}{Mask: 7, Fmt: 0, Cx: w, PszText: syscall.StringToUTF16Ptr(text)}
-	procSendMessageW.Call(lv, 0x1061, uintptr(idx), uintptr(unsafe.Pointer(&c)))
-}
+func (u *UI) listLayout(gtx layout.Context) layout.Dimensions {
+	u.mu.Lock()
+	list := u.jdkList
+	u.mu.Unlock()
 
-func onSize(l uintptr) {
-	w := int32(l & 0xFFFF)
-	h := int32((l >> 16) & 0xFFFF)
-	if w < 100 {
-		return
+	if len(list) == 0 {
+		return material.Label(u.th, unit.Sp(14), "未检测到 JDK\n点击「扫描」重新搜索，或「添加」手动指定").Layout(gtx)
 	}
-	cw := uintptr(w) - 24
-	gap := uintptr(12)
-	bw := uintptr(110)
-	bh := uintptr(30)
-	ly := gap + 40
-	lh := uintptr(h) - 162
-	by := ly + lh + gap
 
-	procSetWindowPos.Call(theApp.ListView, 0, gap, ly, cw, lh, 4)
-	btns := []uintptr{gap, gap*2 + bw, gap*3 + bw*2, gap*4 + bw*3}
-	for i := range btns {
-		procSetWindowPos.Call(theApp.Btns[i], 0, btns[i], by, bw, bh, 4)
-	}
-	procSetWindowPos.Call(theApp.Status, 0, gap, by+bh+gap, cw, 22, 4)
-}
+	return material.List(u.th, &u.list).Layout(gtx, len(list), func(gtx layout.Context, i int) layout.Dimensions {
+		u.mu.Lock()
+		j := list[i]
+		u.mu.Unlock()
 
-func onCmd(w uintptr) {
-	switch w & 0xFFFF {
-	case 102:
-		go scan()
-	case 103:
-		onAdd()
-	case 104:
-		onDl()
-	case 101:
-		onSw()
-	}
-}
-
-func onNotify(l uintptr) {
-	code := *(*uint32)(unsafe.Pointer(l + 2*unsafe.Sizeof(uintptr(0))))
-	if code == 0xFFFFFFFD {
-		onSw()
-	}
-}
-
-func setSt(s string) {
-	procSetWindowTextW.Call(theApp.Status, uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(s))))
-}
-
-func msg(t, s string) {
-	procMessageBoxW.Call(theApp.Hwnd,
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(s))),
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(t))), 0)
-}
-
-func setLd(v bool) {
-	n := uintptr(1)
-	if v {
-		n = 0
-	}
-	for _, b := range theApp.Btns {
-		procEnableWindow.Call(b, n)
-	}
-}
-
-func scan() {
-	setLd(true)
-	setSt("正在扫描 JDK ...")
-	j := core.ScanAll(theApp.Config)
-	theApp.mu.Lock()
-	theApp.JDKList = j
-	theApp.mu.Unlock()
-	fill(j)
-	setSt(fmt.Sprintf("就绪 — 共找到 %d 个 JDK", len(j)))
-	setLd(false)
-}
-
-func fill(j []*core.JDKInfo) {
-	procSendMessageW.Call(theApp.ListView, 0x1009, 0, 0)
-	for i, v := range j {
-		m := " "
-		if v.IsCurrent {
-			m = "●"
+		bg := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+		if j.IsCurrent {
+			bg = color.NRGBA{R: 237, G: 247, B: 237, A: 255}
 		}
-		d := fmt.Sprintf("%s JDK %s  %s", m, v.Version, v.Vendor)
-		if v.Tag != "" {
-			d += "  " + v.Tag
+
+		paint.FillShape(gtx.Ops, bg, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+
+		br := widget.Border{
+			Color:        color.NRGBA{R: 224, G: 224, B: 224, A: 255},
+			CornerRadius: unit.Dp(6),
+			Width:        unit.Dp(1),
 		}
-		it := struct {
-			Mask       uint32
-			IItem      int32
-			ISubItem   int32
-			State      uint32
-			StateMask  uint32
-			PszText    *uint16
-			CchTextMax int32
-			IImage     int32
-			LParam     uintptr
-		}{Mask: 1, IItem: int32(i), PszText: syscall.StringToUTF16Ptr(d)}
-		procSendMessageW.Call(theApp.ListView, 0x104D, 0, uintptr(unsafe.Pointer(&it)))
-		s := struct {
-			Mask       uint32
-			IItem      int32
-			ISubItem   int32
-			State      uint32
-			StateMask  uint32
-			PszText    *uint16
-			CchTextMax int32
-			IImage     int32
-			LParam     uintptr
-		}{Mask: 1, IItem: int32(i), ISubItem: 1, PszText: syscall.StringToUTF16Ptr(v.Path)}
-		procSendMessageW.Call(theApp.ListView, 0x104E, uintptr(i), uintptr(unsafe.Pointer(&s)))
-	}
+		return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return u.itemLayout(gtx, j)
+			})
+		})
+	})
 }
 
-func sel() *core.JDKInfo {
-	theApp.mu.Lock()
-	defer theApp.mu.Unlock()
-	r, _, _ := procSendMessageW.Call(theApp.ListView, 0x100C, ^uintptr(0), 2)
-	i := int(r)
-	if i < 0 || i >= len(theApp.JDKList) {
-		return nil
-	}
-	return theApp.JDKList[i]
-}
-
-func onSw() {
-	j := sel()
-	if j == nil {
-		msg("提示", "请先在列表中点击选择一个 JDK 版本")
-		return
-	}
+func (u *UI) itemLayout(gtx layout.Context, j *core.JDKInfo) layout.Dimensions {
+	dotCol := color.NRGBA{}
+	tagText := j.Tag
+	tagCol := color.NRGBA{R: 200, G: 100, B: 50, A: 255}
 	if j.IsCurrent {
-		msg("提示", "该版本已是当前使用的版本")
+		dotCol = color.NRGBA{R: 76, G: 175, B: 80, A: 255}
+		tagText = "✓ 当前使用"
+		tagCol = color.NRGBA{R: 56, G: 142, B: 60, A: 255}
+	}
+
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X = gtx.Dp(24)
+			l := material.Label(u.th, unit.Sp(16), "●")
+			l.Color = dotCol
+			return l.Layout(gtx)
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					l := material.Label(u.th, unit.Sp(14), fmt.Sprintf("JDK %s  %s", j.Version, j.Vendor))
+					l.Font.Weight = 600
+					if j.IsCurrent {
+						l.Color = color.NRGBA{R: 46, G: 125, B: 50, A: 255}
+					}
+					return l.Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					l := material.Label(u.th, unit.Sp(11), j.Path)
+					l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+					return l.Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if tagText == "" {
+				return layout.Dimensions{}
+			}
+			l := material.Label(u.th, unit.Sp(11), tagText)
+			l.Color = tagCol
+			return l.Layout(gtx)
+		}),
+	)
+}
+
+func (u *UI) buttons(gtx layout.Context) layout.Dimensions {
+	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+		layout.Rigid(material.Button(u.th, &u.scanBtn, "扫描").Layout),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+		layout.Rigid(material.Button(u.th, &u.addBtn, "添加").Layout),
+		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+		layout.Rigid(material.Button(u.th, &u.dlBtn, "下载 JDK").Layout),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return layout.Spacer{Width: unit.Dp(1)}.Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			btn := material.Button(u.th, &u.swBtn, "切换")
+			btn.Background = color.NRGBA{R: 25, G: 118, B: 210, A: 255}
+			return btn.Layout(gtx)
+		}),
+	)
+}
+
+func (u *UI) statusLine(gtx layout.Context) layout.Dimensions {
+	l := material.Label(u.th, unit.Sp(12), u.status)
+	l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+	return l.Layout(gtx)
+}
+
+func (u *UI) dialog(gtx layout.Context) {
+	layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		br := widget.Border{
+			Color: color.NRGBA{R: 200, G: 200, B: 200, A: 255},
+			CornerRadius: unit.Dp(8),
+			Width: unit.Dp(1),
+		}
+		return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Background{}.Layout(gtx,
+				func(gtx layout.Context) layout.Dimensions {
+					paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+					return layout.Dimensions{Size: gtx.Constraints.Max}
+				},
+				func(gtx layout.Context) layout.Dimensions {
+					return layout.UniformInset(unit.Dp(20)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+							layout.Rigid(material.H6(u.th, "选择 JDK 版本").Layout),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								var items []layout.FlexChild
+								for _, v := range u.dlVers {
+									v := v
+									items = append(items, layout.Rigid(
+										material.RadioButton(u.th, &u.dlSel, v, "JDK "+v).Layout,
+									))
+								}
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
+							}),
+							layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx,
+									layout.Rigid(material.Button(u.th, &u.dlCancel, "取消").Layout),
+									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+									layout.Rigid(material.Button(u.th, &u.dlCfm, "下载").Layout),
+								)
+							}),
+						)
+					})
+				})
+		})
+	})
+}
+
+func (u *UI) startScan() {
+	u.loading = true
+	u.status = "正在扫描 JDK..."
+	u.w.Invalidate()
+	jdks := core.ScanAll(u.Config)
+	u.scanCh <- jdks
+}
+
+func (u *UI) addJDK() {
+	p := pickFolder()
+	if p == "" {
 		return
 	}
-	setLd(true)
-	setSt("正在请求管理员权限 ...")
+	jdks := core.ScanDirectory(p)
+	if len(jdks) == 0 {
+		u.status = "添加失败：路径下未找到 JDK（需包含 bin/javac.exe）"
+		u.w.Invalidate()
+		return
+	}
+	u.Config.AddScanPath(p)
+	for _, j := range jdks {
+		j.IsPortable = true
+	}
+	u.mu.Lock()
+	u.jdkList = append(u.jdkList, jdks...)
+	u.mu.Unlock()
+	u.status = fmt.Sprintf("已添加: %s", jdks[0].Version)
+	u.w.Invalidate()
+}
+
+func (u *UI) download(ver string) {
+	if ver == "" {
+		return
+	}
+	u.loading = true
+	u.status = fmt.Sprintf("正在下载 JDK %s ...", ver)
+	u.w.Invalidate()
+	p, err := core.DownloadJDK(ver, u.Config.Mirror, nil)
+	if err != nil {
+		u.status = "下载失败: " + err.Error()
+		u.loading = false
+		u.w.Invalidate()
+		return
+	}
+	u.status = fmt.Sprintf("JDK %s 已下载至 %s", ver, p)
+	u.loading = false
+	go u.startScan()
+	u.w.Invalidate()
+}
+
+func (u *UI) doSwitch() {
+	u.mu.Lock()
+	idx := u.selIdx
+	u.mu.Unlock()
+
+	if idx < 0 || idx >= len(u.jdkList) {
+		u.status = "请先在列表中点击选择一个 JDK"
+		u.w.Invalidate()
+		return
+	}
+	j := u.jdkList[idx]
+	if j.IsCurrent {
+		u.status = "该版本已是当前使用的版本"
+		u.w.Invalidate()
+		return
+	}
+
+	u.loading = true
+	u.status = "正在请求管理员权限..."
+	u.w.Invalidate()
 
 	e, _ := os.Executable()
 	a := fmt.Sprintf(`--switch "%s"`, j.Path)
+	sw := windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteW")
 	op := windows.StringToUTF16Ptr("runas")
 	fp := windows.StringToUTF16Ptr(e)
 	pr := windows.StringToUTF16Ptr(a)
-	sh := shell32.NewProc("ShellExecuteW")
-	sh.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(fp)), uintptr(unsafe.Pointer(pr)), 0, 0)
+	sw.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(fp)), uintptr(unsafe.Pointer(pr)), 0, 0)
 
 	rp := core.ResultFilePath()
 	dl := time.Now().Add(60 * time.Second)
 	var rs *core.SwitchResult
 	for time.Now().Before(dl) {
-		if _, e := os.Stat(rp); e == nil {
-			r, e := core.ReadSwitchResult()
-			if e == nil {
+		if _, e2 := os.Stat(rp); e2 == nil {
+			r, e2 := core.ReadSwitchResult()
+			if e2 == nil {
 				rs = r
 				core.CleanResultFile()
 				break
@@ -377,28 +454,19 @@ func onSw() {
 		}
 		time.Sleep(200e6)
 	}
-	setLd(false)
 	if rs == nil {
-		msg("超时", "提权超时（60秒），请检查 UAC")
-		setSt("切换超时")
-		return
+		rs = &core.SwitchResult{Success: false, Error: "超时（60秒），请检查 UAC"}
 	}
-	if rs.Success {
-		j2 := core.ScanAll(theApp.Config)
-		theApp.mu.Lock()
-		theApp.JDKList = j2
-		theApp.mu.Unlock()
-		fill(j2)
-		setSt(fmt.Sprintf("切换成功 — JDK %s（清理 %d 条）", j.Version, rs.PathCleaned))
-	} else {
-		msg("切换失败", rs.Error)
-		setSt("切换失败")
-	}
+	u.swCh <- rs
 }
 
-func onAdd() {
-	b := make([]uint16, 260)
-	t := syscall.StringToUTF16Ptr("选择 JDK 安装目录")
+func pickFolder() string {
+	shl := windows.NewLazySystemDLL("shell32.dll")
+	bw := shl.NewProc("SHBrowseForFolderW")
+	gp := shl.NewProc("SHGetPathFromIDListW")
+
+	buf := make([]uint16, 260)
+	title := windows.StringToUTF16Ptr("选择 JDK 安装目录")
 	bi := struct {
 		Owner    uintptr
 		Root     uintptr
@@ -408,52 +476,13 @@ func onAdd() {
 		Callback uintptr
 		Param    uintptr
 		Image    int32
-	}{Owner: theApp.Hwnd, Display: &b[0], Title: t, Flags: 0x0041}
-	pidl, _, _ := procSHBrowseForFolderW.Call(uintptr(unsafe.Pointer(&bi)))
+	}{Display: &buf[0], Title: title, Flags: 0x0041}
+
+	pidl, _, _ := bw.Call(uintptr(unsafe.Pointer(&bi)))
 	if pidl == 0 {
-		return
+		return ""
 	}
 	pb := make([]uint16, 260)
-	procSHGetPathFromIDListW.Call(pidl, uintptr(unsafe.Pointer(&pb[0])))
-	p := syscall.UTF16ToString(pb)
-	if p == "" {
-		return
-	}
-	j := core.ScanDirectory(p)
-	if len(j) == 0 {
-		msg("添加失败", "路径下未找到 JDK（需要 bin/javac.exe）")
-		return
-	}
-	theApp.Config.AddScanPath(p)
-	for _, v := range j {
-		v.IsPortable = true
-		theApp.mu.Lock()
-		theApp.JDKList = append(theApp.JDKList, v)
-		theApp.mu.Unlock()
-	}
-	fill(theApp.JDKList)
-	setSt(fmt.Sprintf("已添加: %s", j[0].Version))
-}
-
-func onDl() {
-	v := "21"
-	setLd(true)
-	setSt(fmt.Sprintf("正在下载 JDK %s ...", v))
-	go func() {
-		p, e := core.DownloadJDK(v, theApp.Config.Mirror, nil)
-		if e != nil {
-			msg("下载失败", e.Error())
-			setSt("下载失败")
-			setLd(false)
-			return
-		}
-		j2 := core.ScanAll(theApp.Config)
-		theApp.mu.Lock()
-		theApp.JDKList = j2
-		theApp.mu.Unlock()
-		fill(j2)
-		setLd(false)
-		setSt(fmt.Sprintf("JDK %s 已下载至 %s", v, p))
-		msg("下载完成", fmt.Sprintf("JDK %s 已下载到:\n%s", v, p))
-	}()
+	gp.Call(pidl, uintptr(unsafe.Pointer(&pb[0])))
+	return windows.UTF16ToString(pb)
 }
