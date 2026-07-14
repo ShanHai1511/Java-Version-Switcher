@@ -1,0 +1,8 @@
+build/
+.jvs/
+*.exe
+*.reg
+*.syso
+.vscode/
+.idea/
+*.log
