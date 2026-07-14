@@ -24,6 +24,11 @@ import (
 	"jvs/core"
 )
 
+const (
+	dlgNone = iota
+	dlgVersion
+)
+
 type UI struct {
 	Config *core.Config
 	w      *app.Window
@@ -33,19 +38,21 @@ type UI struct {
 	jdkList []*core.JDKInfo
 	status  string
 	loading bool
+	scanOk  bool
 
 	scanBtn  widget.Clickable
 	addBtn   widget.Clickable
 	dlBtn    widget.Clickable
 	swBtn    widget.Clickable
-	list     widget.List
-	selIdx   int
+	dlgState int
 
-	dlOpen   bool
-	dlSel    widget.Enum
-	dlVers   []string
-	dlCfm    widget.Clickable
-	dlCancel widget.Clickable
+	list       widget.List
+	itemClicks []widget.Clickable
+	selIdx     int
+
+	dlVerSel widget.Enum
+	dlVerCfm widget.Clickable
+	dlVerCan widget.Clickable
 
 	scanCh chan []*core.JDKInfo
 	swCh   chan *core.SwitchResult
@@ -60,12 +67,12 @@ func Run(cfg *core.Config) error {
 		swCh:   make(chan *core.SwitchResult, 1),
 	}
 	u.list.Axis = layout.Vertical
-	go u.loop()
+	go u.runLoop()
 	app.Main()
 	return nil
 }
 
-func (u *UI) loop() {
+func (u *UI) runLoop() {
 	u.w = new(app.Window)
 	u.w.Option(
 		app.Title("Java Version Switcher"),
@@ -74,20 +81,20 @@ func (u *UI) loop() {
 	u.th = material.NewTheme()
 	u.th.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
 	u.th.Palette = material.Palette{
-		Fg: color.NRGBA{R: 33, G: 33, B: 33, A: 255},
-		Bg: color.NRGBA{R: 250, G: 250, B: 250, A: 255},
+		Fg:         color.NRGBA{R: 33, G: 33, B: 33, A: 255},
+		Bg:         color.NRGBA{R: 250, G: 250, B: 250, A: 255},
 		ContrastBg: color.NRGBA{R: 25, G: 118, B: 210, A: 255},
 		ContrastFg: color.NRGBA{R: 255, G: 255, B: 255, A: 255},
 	}
 
 	var ops op.Ops
-	go u.startScan()
+	go u.scan()
 
 	for {
 		switch e := u.w.Event().(type) {
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
-			u.layout(gtx)
+			u.frame(gtx)
 			e.Frame(gtx.Ops)
 		case app.DestroyEvent:
 			return
@@ -95,72 +102,95 @@ func (u *UI) loop() {
 	}
 }
 
-func (u *UI) layout(gtx layout.Context) {
-	u.handleClicks(gtx)
-	u.checkCh()
+func (u *UI) frame(gtx layout.Context) {
+	u.handleInput(gtx)
+	u.drainCh()
 
-	layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.card(gtx) }),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return u.listLayout(gtx) }),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.buttons(gtx) }),
-			layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.statusLine(gtx) }),
-		)
-	})
-	if u.dlOpen {
-		u.dialog(gtx)
+	if u.dlgState == dlgVersion {
+		u.drawDlg(gtx)
+	} else {
+		layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.card(gtx) }),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions { return u.listView(gtx) }),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.toolbar(gtx) }),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.statusLine(gtx) }),
+			)
+		})
 	}
 }
 
-func (u *UI) handleClicks(gtx layout.Context) {
+func (u *UI) handleInput(gtx layout.Context) {
 	if u.scanBtn.Clicked(gtx) {
-		go u.startScan()
+		go u.scan()
 	}
 	if u.addBtn.Clicked(gtx) {
-		go u.addJDK()
+		go u.add()
 	}
 	if u.dlBtn.Clicked(gtx) {
-		u.dlOpen = true
-		u.dlVers = core.ListAvailableVersions()
+		u.dlgState = dlgVersion
+		u.w.Invalidate()
+	}
+	if u.dlVerCfm.Clicked(gtx) && u.dlgState == dlgVersion {
+		ver := u.dlVerSel.Value
+		u.dlgState = dlgNone
+		if ver != "" {
+			go u.download(ver)
+		}
+	}
+	if u.dlVerCan.Clicked(gtx) && u.dlgState == dlgVersion {
+		u.dlgState = dlgNone
+		u.w.Invalidate()
 	}
 	if u.swBtn.Clicked(gtx) {
 		go u.doSwitch()
 	}
-	if u.dlCfm.Clicked(gtx) && u.dlOpen {
-		u.dlOpen = false
-		go u.download(u.dlSel.Value)
-	}
-	if u.dlCancel.Clicked(gtx) && u.dlOpen {
-		u.dlOpen = false
+	for i := range u.itemClicks {
+		if u.itemClicks[i].Clicked(gtx) {
+			u.selIdx = i
+		}
 	}
 }
 
-func (u *UI) checkCh() {
+func (u *UI) drainCh() {
 	select {
 	case jdks := <-u.scanCh:
 		u.mu.Lock()
 		u.jdkList = jdks
+		u.itemClicks = make([]widget.Clickable, len(jdks))
 		u.mu.Unlock()
+		u.selIdx = -1
 		u.loading = false
-		u.status = fmt.Sprintf("就绪 — 共找到 %d 个 JDK", len(jdks))
-		u.w.Invalidate()
+		u.scanOk = true
+		u.setStatusF("就绪 — 共找到 %d 个 JDK", len(jdks))
+	default:
+	}
+	select {
 	case r := <-u.swCh:
 		u.loading = false
 		if r.Success {
-			u.status = fmt.Sprintf("切换成功 — 已清理 %d 条旧路径", r.PathCleaned)
-			go u.startScan()
+			u.setStatusF("切换成功 — 已清理 %d 条旧路径", r.PathCleaned)
+			go u.scan()
 		} else {
-			u.status = "切换失败: " + r.Error
+			u.setStatus("切换失败: " + r.Error)
 		}
-		u.w.Invalidate()
 	default:
 	}
 }
 
-func (u *UI) current() *core.JDKInfo {
+func (u *UI) setStatus(s string) {
+	u.status = s
+	u.w.Invalidate()
+}
+
+func (u *UI) setStatusF(f string, a ...interface{}) {
+	u.setStatus(fmt.Sprintf(f, a...))
+}
+
+func (u *UI) currentJDK() *core.JDKInfo {
 	for _, j := range u.jdkList {
 		if j.IsCurrent {
 			return j
@@ -169,10 +199,10 @@ func (u *UI) current() *core.JDKInfo {
 	return nil
 }
 
+// ── Card ──────────────────────────────────────────────
+
 func (u *UI) card(gtx layout.Context) layout.Dimensions {
-	u.mu.Lock()
-	cur := u.current()
-	u.mu.Unlock()
+	cur := u.currentJDK()
 
 	title := "当前未选择"
 	sub := "点击下方列表中的 JDK 后点击 [切换]"
@@ -183,73 +213,67 @@ func (u *UI) card(gtx layout.Context) layout.Dimensions {
 		col = color.NRGBA{R: 56, G: 142, B: 60, A: 255}
 	}
 
-	border := widget.Border{
-		Color: color.NRGBA{R: 224, G: 224, B: 224, A: 255},
-		CornerRadius: unit.Dp(8),
-		Width: unit.Dp(1),
-	}
-	return border.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Background{}.Layout(gtx,
-			func(gtx layout.Context) layout.Dimensions {
-				paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
-				return layout.Dimensions{Size: gtx.Constraints.Max}
-			},
-			func(gtx layout.Context) layout.Dimensions {
-				return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							l := material.Label(u.th, unit.Sp(15), title)
-							l.Color = col
-							l.Font.Weight = 700
-							return l.Layout(gtx)
-						}),
-						layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							l := material.Label(u.th, unit.Sp(12), sub)
-							l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
-							return l.Layout(gtx)
-						}),
-					)
-				})
-			})
+	return card(gtx, u.th, func(gtx layout.Context) layout.Dimensions {
+		return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					l := material.Label(u.th, unit.Sp(15), title)
+					l.Color = col
+					l.Font.Weight = 700
+					return l.Layout(gtx)
+				}),
+				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					l := material.Label(u.th, unit.Sp(12), sub)
+					l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+					return l.Layout(gtx)
+				}),
+			)
+		})
 	})
 }
 
-func (u *UI) listLayout(gtx layout.Context) layout.Dimensions {
+// ── List ──────────────────────────────────────────────
+
+func (u *UI) listView(gtx layout.Context) layout.Dimensions {
 	u.mu.Lock()
 	list := u.jdkList
+	clicks := u.itemClicks
 	u.mu.Unlock()
 
 	if len(list) == 0 {
 		return material.Label(u.th, unit.Sp(14), "未检测到 JDK\n点击「扫描」重新搜索，或「添加」手动指定").Layout(gtx)
 	}
 
-	return material.List(u.th, &u.list).Layout(gtx, len(list), func(gtx layout.Context, i int) layout.Dimensions {
-		u.mu.Lock()
+	return u.list.Layout(gtx, len(list), func(gtx layout.Context, i int) layout.Dimensions {
 		j := list[i]
-		u.mu.Unlock()
-
 		bg := color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 		if j.IsCurrent {
 			bg = color.NRGBA{R: 237, G: 247, B: 237, A: 255}
 		}
 
-		paint.FillShape(gtx.Ops, bg, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
-
-		br := widget.Border{
-			Color:        color.NRGBA{R: 224, G: 224, B: 224, A: 255},
-			CornerRadius: unit.Dp(6),
-			Width:        unit.Dp(1),
-		}
-		return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				return u.itemLayout(gtx, j)
-			})
-		})
+		return layout.Stack{Alignment: layout.W}.Layout(gtx,
+			layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, bg, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			}),
+			layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+				br := widget.Border{
+					Color:        color.NRGBA{R: 224, G: 224, B: 224, A: 255},
+					CornerRadius: unit.Dp(6),
+					Width:        unit.Dp(1),
+				}
+				return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.UniformInset(unit.Dp(10)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return u.itemBody(gtx, j, &clicks[i])
+					})
+				})
+			}),
+		)
 	})
 }
 
-func (u *UI) itemLayout(gtx layout.Context, j *core.JDKInfo) layout.Dimensions {
+func (u *UI) itemBody(gtx layout.Context, j *core.JDKInfo, c *widget.Clickable) layout.Dimensions {
 	dotCol := color.NRGBA{}
 	tagText := j.Tag
 	tagCol := color.NRGBA{R: 200, G: 100, B: 50, A: 255}
@@ -259,51 +283,53 @@ func (u *UI) itemLayout(gtx layout.Context, j *core.JDKInfo) layout.Dimensions {
 		tagCol = color.NRGBA{R: 56, G: 142, B: 60, A: 255}
 	}
 
-	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Min.X = gtx.Dp(24)
-			l := material.Label(u.th, unit.Sp(16), "●")
-			l.Color = dotCol
-			return l.Layout(gtx)
-		}),
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					l := material.Label(u.th, unit.Sp(14), fmt.Sprintf("JDK %s  %s", j.Version, j.Vendor))
-					l.Font.Weight = 600
-					if j.IsCurrent {
-						l.Color = color.NRGBA{R: 46, G: 125, B: 50, A: 255}
-					}
-					return l.Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					l := material.Label(u.th, unit.Sp(11), j.Path)
-					l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
-					return l.Layout(gtx)
-				}),
-			)
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			if tagText == "" {
-				return layout.Dimensions{}
-			}
-			l := material.Label(u.th, unit.Sp(11), tagText)
-			l.Color = tagCol
-			return l.Layout(gtx)
-		}),
-	)
+	return c.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				gtx.Constraints.Min.X = gtx.Dp(24)
+				l := material.Label(u.th, unit.Sp(16), "●")
+				l.Color = dotCol
+				return l.Layout(gtx)
+			}),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						l := material.Label(u.th, unit.Sp(14), fmt.Sprintf("JDK %s  %s", j.Version, j.Vendor))
+						l.Font.Weight = 600
+						if j.IsCurrent {
+							l.Color = color.NRGBA{R: 46, G: 125, B: 50, A: 255}
+						}
+						return l.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						l := material.Label(u.th, unit.Sp(11), j.Path)
+						l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
+						return l.Layout(gtx)
+					}),
+				)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				if tagText == "" {
+					return layout.Dimensions{}
+				}
+				l := material.Label(u.th, unit.Sp(11), tagText)
+				l.Color = tagCol
+				return l.Layout(gtx)
+			}),
+		)
+	})
 }
 
-func (u *UI) buttons(gtx layout.Context) layout.Dimensions {
+// ── Toolbar ───────────────────────────────────────────
+
+func (u *UI) toolbar(gtx layout.Context) layout.Dimensions {
 	return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 		layout.Rigid(material.Button(u.th, &u.scanBtn, "扫描").Layout),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(material.Button(u.th, &u.addBtn, "添加").Layout),
 		layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 		layout.Rigid(material.Button(u.th, &u.dlBtn, "下载 JDK").Layout),
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Spacer{Width: unit.Dp(1)}.Layout(gtx)
-		}),
+		layout.Flexed(1, layout.Spacer{Width: unit.Dp(1)}.Layout),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			btn := material.Button(u.th, &u.swBtn, "切换")
 			btn.Background = color.NRGBA{R: 25, G: 118, B: 210, A: 255}
@@ -312,72 +338,63 @@ func (u *UI) buttons(gtx layout.Context) layout.Dimensions {
 	)
 }
 
+// ── Status ────────────────────────────────────────────
+
 func (u *UI) statusLine(gtx layout.Context) layout.Dimensions {
 	l := material.Label(u.th, unit.Sp(12), u.status)
 	l.Color = color.NRGBA{R: 130, G: 130, B: 130, A: 255}
 	return l.Layout(gtx)
 }
 
-func (u *UI) dialog(gtx layout.Context) {
+// ── Dialog ────────────────────────────────────────────
+
+func (u *UI) drawDlg(gtx layout.Context) {
+	paint.FillShape(gtx.Ops, color.NRGBA{R: 0, G: 0, B: 0, A: 100}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+
 	layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		br := widget.Border{
-			Color: color.NRGBA{R: 200, G: 200, B: 200, A: 255},
-			CornerRadius: unit.Dp(8),
-			Width: unit.Dp(1),
-		}
-		return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Background{}.Layout(gtx,
-				func(gtx layout.Context) layout.Dimensions {
-					paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
-					return layout.Dimensions{Size: gtx.Constraints.Max}
-				},
-				func(gtx layout.Context) layout.Dimensions {
-					return layout.UniformInset(unit.Dp(20)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(material.H6(u.th, "选择 JDK 版本").Layout),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								var items []layout.FlexChild
-								for _, v := range u.dlVers {
-									v := v
-									items = append(items, layout.Rigid(
-										material.RadioButton(u.th, &u.dlSel, v, "JDK "+v).Layout,
-									))
-								}
-								return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
-							}),
-							layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx,
-									layout.Rigid(material.Button(u.th, &u.dlCancel, "取消").Layout),
-									layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
-									layout.Rigid(material.Button(u.th, &u.dlCfm, "下载").Layout),
-								)
-							}),
+		return card(gtx, u.th, func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(20)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(material.H6(u.th, "选择 JDK 版本").Layout),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(12)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						var items []layout.FlexChild
+						for _, v := range core.ListAvailableVersions() {
+							v := v
+							items = append(items, layout.Rigid(material.RadioButton(u.th, &u.dlVerSel, v, "JDK "+v).Layout))
+						}
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
+					}),
+					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx,
+							layout.Rigid(material.Button(u.th, &u.dlVerCan, "取消").Layout),
+							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+							layout.Rigid(material.Button(u.th, &u.dlVerCfm, "下载").Layout),
 						)
-					})
-				})
+					}),
+				)
+			})
 		})
 	})
 }
 
-func (u *UI) startScan() {
-	u.loading = true
-	u.status = "正在扫描 JDK..."
-	u.w.Invalidate()
+// ── Actions ───────────────────────────────────────────
+
+func (u *UI) scan() {
+	u.setStatus("正在扫描 JDK...")
 	jdks := core.ScanAll(u.Config)
 	u.scanCh <- jdks
 }
 
-func (u *UI) addJDK() {
+func (u *UI) add() {
 	p := pickFolder()
 	if p == "" {
 		return
 	}
 	jdks := core.ScanDirectory(p)
 	if len(jdks) == 0 {
-		u.status = "添加失败：路径下未找到 JDK（需包含 bin/javac.exe）"
-		u.w.Invalidate()
+		u.setStatus("添加失败：路径下未找到 JDK（需包含 bin/javac.exe）")
 		return
 	}
 	u.Config.AddScanPath(p)
@@ -386,29 +403,23 @@ func (u *UI) addJDK() {
 	}
 	u.mu.Lock()
 	u.jdkList = append(u.jdkList, jdks...)
+	u.itemClicks = make([]widget.Clickable, len(u.jdkList))
 	u.mu.Unlock()
-	u.status = fmt.Sprintf("已添加: %s", jdks[0].Version)
-	u.w.Invalidate()
+	u.setStatusF("已添加: %s", jdks[0].Version)
 }
 
 func (u *UI) download(ver string) {
-	if ver == "" {
-		return
-	}
 	u.loading = true
-	u.status = fmt.Sprintf("正在下载 JDK %s ...", ver)
-	u.w.Invalidate()
+	u.setStatusF("正在下载 JDK %s ...", ver)
 	p, err := core.DownloadJDK(ver, u.Config.Mirror, nil)
 	if err != nil {
-		u.status = "下载失败: " + err.Error()
+		u.setStatus("下载失败: " + err.Error())
 		u.loading = false
-		u.w.Invalidate()
 		return
 	}
-	u.status = fmt.Sprintf("JDK %s 已下载至 %s", ver, p)
+	u.setStatusF("JDK %s 已下载至 %s", ver, p)
 	u.loading = false
-	go u.startScan()
-	u.w.Invalidate()
+	go u.scan()
 }
 
 func (u *UI) doSwitch() {
@@ -417,36 +428,31 @@ func (u *UI) doSwitch() {
 	u.mu.Unlock()
 
 	if idx < 0 || idx >= len(u.jdkList) {
-		u.status = "请先在列表中点击选择一个 JDK"
-		u.w.Invalidate()
+		u.setStatus("请先在列表中点击选择一个 JDK")
 		return
 	}
 	j := u.jdkList[idx]
 	if j.IsCurrent {
-		u.status = "该版本已是当前使用的版本"
-		u.w.Invalidate()
+		u.setStatus("该版本已是当前使用的版本")
 		return
 	}
 
-	u.loading = true
-	u.status = "正在请求管理员权限..."
-	u.w.Invalidate()
-
+	u.setStatus("正在请求管理员权限...")
 	e, _ := os.Executable()
 	a := fmt.Sprintf(`--switch "%s"`, j.Path)
 	sw := windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteW")
-	op := windows.StringToUTF16Ptr("runas")
-	fp := windows.StringToUTF16Ptr(e)
-	pr := windows.StringToUTF16Ptr(a)
-	sw.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(fp)), uintptr(unsafe.Pointer(pr)), 0, 0)
+	sw.Call(0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("runas"))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(e))),
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(a))),
+		0, 0)
 
 	rp := core.ResultFilePath()
 	dl := time.Now().Add(60 * time.Second)
 	var rs *core.SwitchResult
 	for time.Now().Before(dl) {
 		if _, e2 := os.Stat(rp); e2 == nil {
-			r, e2 := core.ReadSwitchResult()
-			if e2 == nil {
+			if r, e2 := core.ReadSwitchResult(); e2 == nil {
 				rs = r
 				core.CleanResultFile()
 				break
@@ -458,6 +464,25 @@ func (u *UI) doSwitch() {
 		rs = &core.SwitchResult{Success: false, Error: "超时（60秒），请检查 UAC"}
 	}
 	u.swCh <- rs
+}
+
+// ── Helpers ───────────────────────────────────────────
+
+func card(gtx layout.Context, th *material.Theme, body layout.Widget) layout.Dimensions {
+	br := widget.Border{
+		Color:        color.NRGBA{R: 224, G: 224, B: 224, A: 255},
+		CornerRadius: unit.Dp(8),
+		Width:        unit.Dp(1),
+	}
+	return br.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Background{}.Layout(gtx,
+			func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, color.NRGBA{R: 255, G: 255, B: 255, A: 255}, clip.Rect(image.Rectangle{Max: gtx.Constraints.Max}).Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			},
+			body,
+		)
+	})
 }
 
 func pickFolder() string {
