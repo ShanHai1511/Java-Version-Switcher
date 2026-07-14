@@ -39,12 +39,16 @@ var vendorRegexes = []struct {
 	vendor  string
 }{
 	{regexp.MustCompile(`(?i)Zulu`), "Azul Zulu"},
-	{regexp.MustCompile(`(?i)Temurin|Eclipse`), "Adoptium Temurin"},
+	{regexp.MustCompile(`(?i)Temurin|Eclipse Foundation|AdoptOpenJDK`), "Adoptium"},
 	{regexp.MustCompile(`(?i)GraalVM`), "GraalVM"},
 	{regexp.MustCompile(`(?i)OpenJDK`), "OpenJDK"},
-	{regexp.MustCompile(`(?i)Java\s*TM`), "Oracle"},
+	{regexp.MustCompile(`(?i)Java\s*\(?\s*TM`), "Oracle"},
 	{regexp.MustCompile(`(?i)Microsoft`), "Microsoft"},
 	{regexp.MustCompile(`(?i)SAP`), "SAP"},
+	{regexp.MustCompile(`(?i)Liberica|BellSoft`), "Liberica"},
+	{regexp.MustCompile(`(?i)Corretto`), "Amazon Corretto"},
+	{regexp.MustCompile(`(?i)Dragonwell`), "Alibaba Dragonwell"},
+	{regexp.MustCompile(`HotSpot`), "Oracle HotSpot"},
 }
 
 func ScanAll(cfg *Config) []*JDKInfo {
@@ -128,6 +132,7 @@ func ScanAll(cfg *Config) []*JDKInfo {
 		j.Tag = DetermineTag(j.Major)
 	}
 
+	jdks = filterNestedJRE(jdks)
 	jdks = Deduplicate(jdks)
 	sort.Slice(jdks, func(i, j int) bool {
 		return jdks[i].Major > jdks[j].Major
@@ -137,27 +142,65 @@ func ScanAll(cfg *Config) []*JDKInfo {
 }
 
 func scanDirs() []string {
-	var dirs []string
-	programFiles := os.Getenv("ProgramFiles")
-	programFilesX86 := os.Getenv("ProgramFiles(x86)")
+	dirSet := make(map[string]bool)
 
-	javaDir := filepath.Join(programFiles, "Java")
-	if _, err := os.Stat(javaDir); err == nil {
-		dirs = append(dirs, javaDir)
-	}
-	if programFilesX86 != "" {
-		javaDir32 := filepath.Join(programFilesX86, "Java")
-		if _, err := os.Stat(javaDir32); err == nil {
-			dirs = append(dirs, javaDir32)
+	addIfExists := func(path string) {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			dirSet[path] = true
 		}
 	}
 
-	jvsDir := filepath.Join(os.Getenv("USERPROFILE"), ".jvs", "jdk")
-	if _, err := os.Stat(jvsDir); err == nil {
-		dirs = append(dirs, jvsDir)
+	// Standard Java installation paths
+	programFiles := os.Getenv("ProgramFiles")
+	programFilesX86 := os.Getenv("ProgramFiles(x86)")
+	userProfile := os.Getenv("USERPROFILE")
+
+	addIfExists(filepath.Join(programFiles, "Java"))
+	if programFilesX86 != "" {
+		addIfExists(filepath.Join(programFilesX86, "Java"))
 	}
 
-	return dirs
+	// Common JDK vendors
+	addIfExists(filepath.Join(programFiles, "Eclipse Adoptium"))
+	addIfExists(filepath.Join(programFiles, "Eclipse Foundation"))
+	addIfExists(filepath.Join(programFiles, "Amazon Corretto"))
+	addIfExists(filepath.Join(programFiles, "Microsoft"))
+	addIfExists(filepath.Join(programFiles, "BellSoft"))
+	addIfExists(filepath.Join(programFiles, "Liberica JDK"))
+	addIfExists(filepath.Join(programFiles, "GraalVM"))
+
+	addIfExists(filepath.Join(programFilesX86, "Eclipse Adoptium"))
+	addIfExists(filepath.Join(programFilesX86, "Amazon Corretto"))
+	addIfExists(filepath.Join(programFilesX86, "Microsoft"))
+
+	// JVS download cache
+	addIfExists(filepath.Join(userProfile, ".jvs", "jdk"))
+
+	// Current JAVA_HOME (if set and points to a different location)
+	javaHome := GetCurrentJAVA_HOME()
+	if javaHome != "" {
+		parent := filepath.Dir(javaHome)
+		if parent != "." && parent != string(filepath.Separator) {
+			addIfExists(parent)
+		}
+		addIfExists(javaHome)
+	}
+
+	// Scoop-managed JDK
+	scoopDir := filepath.Join(userProfile, "scoop", "apps")
+	if scoopApps, err := os.ReadDir(scoopDir); err == nil {
+		for _, app := range scoopApps {
+			if app.IsDir() && strings.Contains(strings.ToLower(app.Name()), "jdk") {
+				addIfExists(filepath.Join(scoopDir, app.Name(), "current"))
+			}
+		}
+	}
+
+	result := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		result = append(result, d)
+	}
+	return result
 }
 
 func ScanDirectory(root string) []*JDKInfo {
@@ -203,7 +246,12 @@ func ScanRegistryPath(regPath string) []*JDKInfo {
 
 func validateJDK(jdkPath string) *JDKInfo {
 	javaExe := filepath.Join(jdkPath, "bin", "java.exe")
+	javacExe := filepath.Join(jdkPath, "bin", "javac.exe")
 	if _, err := os.Stat(javaExe); os.IsNotExist(err) {
+		return nil
+	}
+	// Skip JRE-only installations (no javac = not a JDK)
+	if _, err := os.Stat(javacExe); os.IsNotExist(err) {
 		return nil
 	}
 
@@ -268,6 +316,29 @@ func ParseMajor(version string) int {
 		return 0
 	}
 	return major
+}
+
+func filterNestedJRE(list []*JDKInfo) []*JDKInfo {
+	var result []*JDKInfo
+outer:
+	for _, j := range list {
+		lower := strings.ToLower(j.Path)
+		// Skip if this is a JRE directory
+		if strings.HasSuffix(lower, `\jre`) || strings.Contains(lower, `\jre\`) {
+			// Check if any ancestor is also in the list as a JDK
+			parent := filepath.Dir(j.Path)
+			for _, other := range list {
+				if other == j {
+					continue
+				}
+				if strings.EqualFold(other.Path, parent) {
+					continue outer // Skip this nested JRE
+				}
+			}
+		}
+		result = append(result, j)
+	}
+	return result
 }
 
 func Deduplicate(list []*JDKInfo) []*JDKInfo {

@@ -1,12 +1,25 @@
 param(
-    [string]$Version = "2.0.0",
+    [string]$Version = "1.0.0",
     [switch]$Release
 )
 
 $OutDir = "build"
 $Name = "jvs"
+$Manifest = "resources\jvs.manifest"
+$Syso = "rsrc_windows_amd64.syso"
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+
+# 生成资源文件（内嵌 manifest 以启用视觉样式）
+if (Test-Path $Syso) { Remove-Item -Force $Syso }
+$rsrc = Get-Command "rsrc.exe" -ErrorAction SilentlyContinue
+if (-not $rsrc) { $rsrc = Get-ChildItem "$env:USERPROFILE\go\bin\rsrc.exe" -ErrorAction SilentlyContinue }
+if ($rsrc) {
+    & $rsrc.Source -manifest $Manifest -o $Syso
+    Write-Host "Resource embedded: $Syso" -ForegroundColor Cyan
+} else {
+    Write-Host "WARNING: rsrc not found, UI visual styles disabled" -ForegroundColor Yellow
+}
 
 $ldflags = "-s -w -X main.Version=$Version"
 
@@ -19,10 +32,8 @@ if (-not $Release) {
 
 Write-Host "=== Release Build ===" -ForegroundColor Cyan
 
-# 生产构建（无控制台窗口）
 go build -ldflags="$ldflags -H=windowsgui" -o "$OutDir\$Name.exe"
 
-# 检查 UPX 是否可用
 $upx = Get-Command upx -ErrorAction SilentlyContinue
 if ($upx) {
     Write-Host "Compressing with UPX..." -ForegroundColor Yellow
