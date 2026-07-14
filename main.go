@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"jvs/core"
 	"jvs/gui"
@@ -27,14 +25,13 @@ func main() {
 	cfgPath := core.ConfigPath()
 	cfg, err := core.LoadConfig(cfgPath)
 	if err != nil {
-		showFatalError(fmt.Sprintf("加载配置失败: %v", err))
-		return
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
 	}
 
-	_ = cfg // unused for now, gui.Run will use it
-	err = gui.Run(cfg)
-	if err != nil {
-		showFatalError(fmt.Sprintf("GUI 启动失败: %v", err))
+	if err := gui.Run(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "GUI 启动失败: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -78,15 +75,4 @@ func handleSubprocess() {
 		os.Exit(0)
 	}
 	os.Exit(1)
-}
-
-func showFatalError(msg string) {
-	user32 := syscall.NewLazyDLL("user32.dll")
-	procMessageBoxW := user32.NewProc("MessageBoxW")
-	procMessageBoxW.Call(
-		0,
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(msg))),
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr("Java Version Switcher - 错误"))),
-		0x00000010,
-	)
 }
