@@ -11,7 +11,7 @@ import (
 	"jvs/gui"
 )
 
-var Version = "2.0.0-dev"
+var Version = "1.0.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--switch" {

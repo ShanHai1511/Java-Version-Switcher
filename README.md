@@ -1,4 +1,4 @@
-# Java Version Switcher (JVS) v2.0
+# Java Version Switcher (JVS) v1.0
 
 > 极致轻量的 Windows Java 版本切换工具，纯 Go 编写，原生 Win32 界面。
 
