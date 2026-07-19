@@ -474,6 +474,25 @@ func (u *UI) drawDl(gtx layout.Context) {
 						}
 						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, ch...)
 					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						if u.dlProgress <= 0 || u.dlTotal <= 0 {
+							return layout.Dimensions{}
+						}
+						pct := float32(u.dlDone) / float32(u.dlTotal)
+						barH := gtx.Dp(6)
+						return layout.Stack{}.Layout(gtx,
+							layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+								paint.FillShape(gtx.Ops, n(224), clip.Rect{Max: image.Pt(gtx.Constraints.Max.X, barH)}.Op())
+								return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, barH)}
+							}),
+							layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+								w := int(float32(gtx.Constraints.Max.X) * pct)
+								if w <= 0 { return layout.Dimensions{} }
+								paint.FillShape(gtx.Ops, primary, clip.Rect{Max: image.Pt(w, barH)}.Op())
+								return layout.Dimensions{Size: image.Pt(w, barH)}
+							}),
+						)
+					}),
 					layout.Rigid(layout.Spacer{Height: unit.Dp(16)}.Layout),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						return layout.Flex{Axis: layout.Horizontal, Spacing: layout.SpaceEnd}.Layout(gtx,
@@ -530,11 +549,38 @@ func (u *UI) doDl(ver string) {
 	u.stat = fmt.Sprintf("Downloading JDK %s ...", ver)
 	u.statColor = nrgba(25, 118, 210)
 	u.w.Invalidate()
-	_, err := core.DownloadJDK(ver, u.cfg.Mirror, nil)
-	if err != nil { u.stat = "Failed: " + err.Error(); u.statColor = nrgba(230, 90, 26); u.w.Invalidate(); return }
-	u.stat = fmt.Sprintf("Downloaded JDK %s", ver)
-	u.statColor = n(33)
-	go u.doScan()
+
+	progressCh := make(chan core.DownloadProgress, 64)
+	go func() {
+		for p := range progressCh {
+			u.mu.Lock()
+			u.dlProgress = 1
+			u.dlDone = p.Downloaded
+			u.dlTotal = p.Total
+			u.mu.Unlock()
+			u.w.Invalidate()
+			if p.Done {
+				close(progressCh)
+			}
+		}
+	}()
+
+	_, err := core.DownloadJDK(ver, u.cfg.Mirror, progressCh)
+	<-progressCh
+
+	u.mu.Lock()
+	u.dlProgress = 0
+	u.mu.Unlock()
+	u.w.Invalidate()
+
+	if err != nil {
+		u.stat = "Download failed: " + err.Error()
+		u.statColor = nrgba(230, 90, 26)
+	} else {
+		u.stat = fmt.Sprintf("Downloaded JDK %s", ver)
+		u.statColor = n(33)
+		go u.doScan()
+	}
 }
 
 func (u *UI) doSw() {
