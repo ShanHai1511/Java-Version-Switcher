@@ -123,6 +123,8 @@ func DownloadJDK(version, mirror string, progressCh chan<- DownloadProgress) (st
 		if err := ExtractZip(zipPath, extractDir); err != nil {
 			return "", fmt.Errorf("解压失败: %w", err)
 		}
+		// 解压成功后删除原始 ZIP，避免缓存无限增长
+		os.Remove(zipPath)
 		return extractDir, nil
 	}
 
@@ -142,6 +144,10 @@ func ExtractZip(src, dest string) error {
 
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
+		// ZIP Slip 防护：确保解压路径不跳出 dest 目录
+		if !strings.HasPrefix(filepath.Clean(fpath), filepath.Clean(dest)+string(filepath.Separator)) && fpath != filepath.Clean(dest) {
+			return fmt.Errorf("zip 条目路径非法（可能为路径穿越攻击）: %s", f.Name)
+		}
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(fpath, 0755)
 			continue
@@ -173,10 +179,16 @@ func ExtractZip(src, dest string) error {
 	entries, _ := os.ReadDir(dest)
 	if len(entries) == 1 && entries[0].IsDir() {
 		innerDir := filepath.Join(dest, entries[0].Name())
-		tempDest := dest + "_tmp"
-		os.Rename(innerDir, tempDest)
+		// 使用 os.MkdirTemp 生成唯一临时目录名，避免并发解压时目录名冲突
+		tmpDest, mkErr := os.MkdirTemp(filepath.Dir(dest), ".jvs-extract-*")
+		if mkErr != nil {
+			return mkErr
+		}
+		os.Rename(innerDir, tmpDest)
 		os.RemoveAll(dest)
-		os.Rename(tempDest, dest)
+		if err := os.Rename(tmpDest, dest); err != nil {
+			return fmt.Errorf("提升解压目录失败: %w", err)
+		}
 	}
 
 	return nil

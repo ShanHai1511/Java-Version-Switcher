@@ -147,7 +147,9 @@ func BackupEnvVars(backupFile string) error {
 		b.WriteString(fmt.Sprintf("\"Path\"=\"%s\"\n", escapeRegStr(path)))
 	}
 
-	os.MkdirAll(filepath.Dir(backupFile), 0755)
+	if err := os.MkdirAll(filepath.Dir(backupFile), 0755); err != nil {
+		return fmt.Errorf("创建备份目录失败: %w", err)
+	}
 	return os.WriteFile(backupFile, []byte(b.String()), 0644)
 }
 
@@ -157,6 +159,9 @@ func BackupFilePath() string {
 		appData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming")
 	}
 	backupDir := filepath.Join(appData, "JVS", "backup")
-	os.MkdirAll(backupDir, 0755)
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		// 返回默认 TEMP 路径作为降级方案
+		return filepath.Join(os.Getenv("TEMP"), "jvs_backup_"+time.Now().Format("20060102_150405")+".reg")
+	}
 	return filepath.Join(backupDir, time.Now().Format("20060102_150405")+".reg")
 }

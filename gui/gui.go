@@ -406,6 +406,7 @@ func folder() string {
 	shl := windows.NewLazySystemDLL("shell32.dll")
 	bw := shl.NewProc("SHBrowseForFolderW")
 	gp := shl.NewProc("SHGetPathFromIDListW")
+	cf := windows.NewLazySystemDLL("ole32.dll").NewProc("CoTaskMemFree")
 	buf := make([]uint16, 260)
 	bi := struct {
 		Owner, Root uintptr
@@ -420,5 +421,7 @@ func folder() string {
 	if pidl == 0 { return "" }
 	pb := make([]uint16, 260)
 	gp.Call(pidl, uintptr(unsafe.Pointer(&pb[0])))
+	// Shell32 分配的 PIDL 必须通过 CoTaskMemFree 释放，否则每次打开文件夹选择框都会泄漏内存
+	cf.Call(pidl)
 	return windows.UTF16ToString(pb)
 }

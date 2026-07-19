@@ -318,6 +318,9 @@ func ParseMajor(version string) int {
 	return major
 }
 
+// filterNestedJRE 过滤嵌套在 JDK 内部的 JRE 目录，只保留完整 JDK。
+// 逻辑：若某条目的路径以 \jre 或 \jre\ 结尾/包含，且存在一个同级的 JDK 条目为其父目录，则跳过该 JRE。
+// 注意：此函数仅匹配 \jre 命名，Android NDK 等非标准 JRE 布局不在本函数覆盖范围内。
 func filterNestedJRE(list []*JDKInfo) []*JDKInfo {
 	var result []*JDKInfo
 outer:

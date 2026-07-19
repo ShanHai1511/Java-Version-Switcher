@@ -37,12 +37,17 @@ func main() {
 
 func handleSubprocess() {
 	jdkPath := ""
+	var backupFile string
 
 	for i := 2; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		if strings.HasPrefix(arg, "--") {
-			if arg == "--backup" || arg == "--backup-file" {
-				i++
+			switch arg {
+			case "--backup-file":
+				if i+1 < len(os.Args) {
+					i++
+					backupFile = os.Args[i]
+				}
 			}
 			continue
 		}
@@ -60,7 +65,7 @@ func handleSubprocess() {
 		os.Exit(1)
 	}
 
-	result := core.SwitchJDK(jdkPath)
+	result := core.SwitchJDK(jdkPath, backupFile)
 
 	if writeErr := core.WriteSwitchResult(result); writeErr != nil {
 		result2 := &core.SwitchResult{

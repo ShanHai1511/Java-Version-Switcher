@@ -17,11 +17,16 @@ type SwitchResult struct {
 	Error       string `json:"error,omitempty"`
 }
 
-func SwitchJDK(jdkPath string) *SwitchResult {
+func SwitchJDK(jdkPath string, backupFile ...string) *SwitchResult {
 	result := &SwitchResult{
-		NewHome:    jdkPath,
-		BackupFile: BackupFilePath(),
+		NewHome: jdkPath,
 	}
+
+	bf := BackupFilePath()
+	if len(backupFile) > 0 && backupFile[0] != "" {
+		bf = backupFile[0]
+	}
+	result.BackupFile = bf
 
 	oldHome, _ := ReadEnvVar("JAVA_HOME")
 	result.OldHome = oldHome
@@ -41,9 +46,9 @@ func SwitchJDK(jdkPath string) *SwitchResult {
 
 	if err := WriteEnvVar("JAVA_HOME", jdkPath); err != nil {
 		result.Error = fmt.Sprintf("写入 JAVA_HOME 失败: %v", err)
-		restoreErr := RestoreEnvVars(result.BackupFile)
-		if restoreErr != nil {
-			result.Error += fmt.Sprintf("（回滚也失败: %v）", restoreErr)
+		rollbackErr := doRollback(result.BackupFile)
+		if rollbackErr != nil {
+			result.Error += fmt.Sprintf("（回滚失败: %v）", rollbackErr)
 		} else {
 			result.Error += "（已自动回滚）"
 		}
@@ -54,9 +59,9 @@ func SwitchJDK(jdkPath string) *SwitchResult {
 	pathVal, err := ReadEnvVar("Path")
 	if err != nil {
 		result.Error = fmt.Sprintf("读取 Path 失败: %v", err)
-		restoreErr := RestoreEnvVars(result.BackupFile)
-		if restoreErr != nil {
-			result.Error += fmt.Sprintf("（回滚也失败: %v）", restoreErr)
+		rollbackErr := doRollback(result.BackupFile)
+		if rollbackErr != nil {
+			result.Error += fmt.Sprintf("（回滚失败: %v）", rollbackErr)
 		} else {
 			result.Error += "（已自动回滚）"
 		}
@@ -67,21 +72,11 @@ func SwitchJDK(jdkPath string) *SwitchResult {
 	cleanedPath, removed := CleanPath(pathVal, oldHome)
 	result.PathCleaned = removed
 
-	if len(cleanedPath) < 50 {
-		restoreErr := RestoreEnvVars(result.BackupFile)
-		result.Error = fmt.Sprintf("Path 清洗后过短(%d字符)，疑似异常，已回滚", len(cleanedPath))
-		if restoreErr != nil {
-			result.Error += fmt.Sprintf("（回滚也失败: %v）", restoreErr)
-		}
-		result.Success = false
-		return result
-	}
-
 	if err := WriteEnvVar("Path", cleanedPath); err != nil {
 		result.Error = fmt.Sprintf("写入 Path 失败: %v", err)
-		restoreErr := RestoreEnvVars(result.BackupFile)
-		if restoreErr != nil {
-			result.Error += fmt.Sprintf("（回滚也失败: %v）", restoreErr)
+		rollbackErr := doRollback(result.BackupFile)
+		if rollbackErr != nil {
+			result.Error += fmt.Sprintf("（回滚失败: %v）", rollbackErr)
 		} else {
 			result.Error += "（已自动回滚）"
 		}
@@ -99,6 +94,11 @@ func SwitchJDK(jdkPath string) *SwitchResult {
 	return result
 }
 
+// doRollback 尝试从备份文件恢复环境变量，返回 nil 表示恢复成功
+func doRollback(backupFile string) error {
+	return RestoreEnvVars(backupFile)
+}
+
 func CleanPath(path string, oldJdkDir string) (string, int) {
 	items := strings.Split(path, ";")
 	var cleaned []string
@@ -114,13 +114,20 @@ func CleanPath(path string, oldJdkDir string) (string, int) {
 
 		lower := strings.ToLower(trimmed)
 
-		shouldRemove := strings.Contains(lower, `\java\`) ||
-			strings.Contains(lower, `\jdk\`) ||
-			strings.Contains(lower, `\jre\`) ||
-			strings.Contains(lower, `%java_home%\bin`)
+		// 只清理与旧 JDK 直接相关的路径，避免误删其他工具的 Java 相关目录
+		shouldRemove := false
 
-		if !shouldRemove && oldJdkDir != "" && strings.HasPrefix(lower, oldJdkDirLower) {
+		// 1. 字面量 "%JAVA_HOME%\bin"（注册表中未展开的变量引用）
+		if lower == "%java_home%\\bin" {
 			shouldRemove = true
+		}
+
+		// 2. 旧 JDK home 的直接子目录（bin / jre）及其所有嵌套路径
+		if oldJdkDir != "" {
+			oldPrefix := oldJdkDirLower + string(filepath.Separator)
+			if lower == oldJdkDirLower || strings.HasPrefix(lower, oldPrefix) {
+				shouldRemove = true
+			}
 		}
 
 		if shouldRemove {
