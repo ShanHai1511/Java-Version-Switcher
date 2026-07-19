@@ -158,10 +158,5 @@ func BackupFilePath() string {
 	if appData == "" {
 		appData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming")
 	}
-	backupDir := filepath.Join(appData, "JVS", "backup")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		// 返回默认 TEMP 路径作为降级方案
-		return filepath.Join(os.Getenv("TEMP"), "jvs_backup_"+time.Now().Format("20060102_150405")+".reg")
-	}
-	return filepath.Join(backupDir, time.Now().Format("20060102_150405")+".reg")
+	return filepath.Join(appData, "JVS", "backup", time.Now().Format("20060102_150405")+".reg")
 }

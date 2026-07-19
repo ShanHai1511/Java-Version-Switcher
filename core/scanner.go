@@ -58,6 +58,9 @@ func ScanAll(cfg *Config) []*JDKInfo {
 		wg   sync.WaitGroup
 		dirs = scanDirs()
 	)
+	// 对 cfg.ScanPaths 做快照，避免 GUI 线程 AddScanPath 修改时引发 Data Race
+	scanPaths := make([]string, len(cfg.ScanPaths))
+	copy(scanPaths, cfg.ScanPaths)
 
 	seen := make(map[string]bool)
 
@@ -94,7 +97,7 @@ func ScanAll(cfg *Config) []*JDKInfo {
 		}
 	}()
 
-	for _, customPath := range cfg.ScanPaths {
+	for _, customPath := range scanPaths {
 		wg.Add(1)
 		go func(p string) {
 			defer wg.Done()

@@ -153,17 +153,13 @@ func RestoreEnvVars(backupFile string) error {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, `"JAVA_HOME"=`) {
 			val := extractRegValue(line)
-			if val != "" {
-				if err := WriteEnvVar("JAVA_HOME", val); err != nil {
-					return err
-				}
+			if err := WriteEnvVar("JAVA_HOME", val); err != nil {
+				return err
 			}
 		} else if strings.HasPrefix(line, `"Path"=`) {
 			val := extractRegValue(line)
-			if val != "" {
-				if err := WriteEnvVar("Path", val); err != nil {
-					return err
-				}
+			if err := WriteEnvVar("Path", val); err != nil {
+				return err
 			}
 		}
 	}

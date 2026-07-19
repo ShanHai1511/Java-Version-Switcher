@@ -112,8 +112,6 @@ func DownloadJDK(version, mirror string, progressCh chan<- DownloadProgress) (st
 		}
 	}
 
-	outFile.Close()
-
 	if progressCh != nil {
 		progressCh <- DownloadProgress{Done: true, Total: total}
 	}
@@ -161,17 +159,15 @@ func ExtractZip(src, dest string) error {
 		if err != nil {
 			return err
 		}
+		defer rc.Close()
 
 		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 		if err != nil {
-			rc.Close()
 			return err
 		}
+		defer outFile.Close()
 
-		_, err = io.Copy(outFile, rc)
-		rc.Close()
-		outFile.Close()
-		if err != nil {
+		if _, err = io.Copy(outFile, rc); err != nil {
 			return err
 		}
 	}
