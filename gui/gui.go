@@ -24,6 +24,19 @@ import (
 	"jvs/core"
 )
 
+// Palette tokens
+var (
+	primary   = color.NRGBA{R: 0x19, G: 0x76, B: 0xC2, A: 0xFF}
+	success   = color.NRGBA{R: 0x2E, G: 0x7D, B: 0x32, A: 0xFF}
+	warning   = color.NRGBA{R: 0xE6, G: 0x5A, B: 0x1A, A: 0xFF}
+	bgPage    = color.NRGBA{R: 0xF5, G: 0xF7, B: 0xFA, A: 0xFF}
+	bgCard    = color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+	border    = color.NRGBA{R: 0xE0, G: 0xE6, B: 0xEF, A: 0xFF}
+	textPri   = color.NRGBA{R: 0x21, G: 0x29, B: 0x3D, A: 0xFF}
+	textSec   = color.NRGBA{R: 0x6B, G: 0x7B, B: 0x8D, A: 0xFF}
+	textMuted = color.NRGBA{R: 0x9E, G: 0xAB, B: 0xBC, A: 0xFF}
+)
+
 type UI struct {
 	cfg *core.Config
 	w   *app.Window
@@ -32,6 +45,7 @@ type UI struct {
 	mu   sync.Mutex
 	list []*core.JDKInfo
 	stat string
+	statColor color.NRGBA
 
 	scan widget.Clickable
 	add  widget.Clickable
@@ -42,10 +56,14 @@ type UI struct {
 	item []widget.Clickable
 	sel  int
 
-	showDl bool
-	dlVer  widget.Enum
-	dlOk   widget.Clickable
-	dlNo   widget.Clickable
+	showDl     bool
+	dlVer      widget.Enum
+	dlProgress float32
+	dlDone     int64
+	dlTotal    int64
+	dlErr      string
+	dlOk       widget.Clickable
+	dlNo       widget.Clickable
 
 	sc chan []*core.JDKInfo
 	sc2 chan *core.SwitchResult
@@ -61,7 +79,7 @@ func Run(cfg *core.Config) error {
 
 func (u *UI) loop() {
 	u.w = new(app.Window)
-	u.w.Option(app.Title("Java Version Switcher"), app.Size(unit.Dp(720), unit.Dp(540)))
+	u.w.Option(app.Title("Java Version Switcher"), app.Size(unit.Dp(780), unit.Dp(600)))
 	u.th = material.NewTheme()
 	u.th.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
 	u.th.Palette = material.Palette{Fg: n(33), Bg: n(245), ContrastBg: nrgba(25, 118, 210), ContrastFg: n(255)}
@@ -133,16 +151,19 @@ func (u *UI) recv() {
 		u.mu.Unlock()
 		u.sel = -1
 		u.stat = fmt.Sprintf("Found %d JDK(s)", len(v))
+		u.statColor = n(33)
 		u.w.Invalidate()
 	default:
 	}
 	select {
 	case r := <-u.sc2:
 		if r.Success {
-			u.stat = fmt.Sprintf("Switched! Cleaned %d path(s)", r.PathCleaned)
+			u.stat = fmt.Sprintf("Switched! Cleaned %d path entries", r.PathCleaned)
+			u.statColor = n(33)
 			go u.doScan()
 		} else {
 			u.stat = "Error: " + r.Error
+			u.statColor = nrgba(230, 90, 26)
 		}
 		u.w.Invalidate()
 	default:
@@ -165,27 +186,75 @@ func (u *UI) info() *core.JDKInfo {
 
 func (u *UI) infoCard(gtx layout.Context) layout.Dimensions {
 	c := u.info()
-	t, s, c2 := "No JDK selected", "Pick one and click Switch", n(158)
 	if c != nil {
-		t = fmt.Sprintf("✓ JDK %s · %s", c.Version, c.Vendor)
-		s = c.Path; c2 = nrgba(76, 175, 80)
+		return u.currentCard(gtx, c)
 	}
-	return card(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					l := material.Label(u.th, unit.Sp(15), t)
-					l.Color = c2; l.Font.Weight = 700
-					return l.Layout(gtx)
-				}),
-				layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					l := material.Label(u.th, unit.Sp(11), s)
-					l.Color = n(117)
-					return l.Layout(gtx)
-				}),
-			)
-		})
+	return u.emptyCard(gtx)
+}
+
+func (u *UI) currentCard(gtx layout.Context, c *core.JDKInfo) layout.Dimensions {
+	return widget.Border{Color: n(33), CornerRadius: unit.Dp(10), Width: unit.Dp(1)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Background{}.Layout(gtx,
+			func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, nrgba(232, 245, 233), clip.Rect{Max: gtx.Constraints.Max}.Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return layout.UniformInset(unit.Dp(14)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									l := material.Label(u.th, unit.Sp(13), "[ACTIVE]")
+									l.Color = n(33)
+									return l.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									l := material.Label(u.th, unit.Sp(16), "JDK "+c.Version)
+									l.Color = n(33)
+									return l.Layout(gtx)
+								}),
+							)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							l := material.Label(u.th, unit.Sp(12), c.Path)
+							l.Color = n(117)
+							return l.Layout(gtx)
+						}),
+					)
+				})
+			},
+		)
+	})
+}
+
+func (u *UI) emptyCard(gtx layout.Context) layout.Dimensions {
+	return widget.Border{Color: n(224), CornerRadius: unit.Dp(10), Width: unit.Dp(1)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Background{}.Layout(gtx,
+			func(gtx layout.Context) layout.Dimensions {
+				paint.FillShape(gtx.Ops, n(255), clip.Rect{Max: gtx.Constraints.Max}.Op())
+				return layout.Dimensions{Size: gtx.Constraints.Max}
+			},
+			func(gtx layout.Context) layout.Dimensions {
+				return layout.UniformInset(unit.Dp(20)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							l := material.Label(u.th, unit.Sp(15), "No JDK is currently active")
+							l.Color = n(117)
+							return l.Layout(gtx)
+						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(4)}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							l := material.Label(u.th, unit.Sp(12), "Scan or add a JDK, then click Switch")
+							l.Color = n(158)
+							return l.Layout(gtx)
+						}),
+					)
+				})
+			},
+		)
 	})
 }
 
@@ -198,7 +267,7 @@ func (u *UI) items(gtx layout.Context) layout.Dimensions {
 	if len(v) == 0 {
 		return card(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(32)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				l := material.Label(u.th, unit.Sp(14), "No JDK found. Click Scan or Add.")
+				l := material.Label(u.th, unit.Sp(14), "--")
 				l.Color = n(158)
 				return l.Layout(gtx)
 			})
@@ -243,41 +312,125 @@ func (u *UI) items(gtx layout.Context) layout.Dimensions {
 }
 
 func (u *UI) row(gtx layout.Context, j *core.JDKInfo, c *widget.Clickable) layout.Dimensions {
-	dc := color.NRGBA{}
-	tg := j.Tag
-	if j.IsCurrent { dc = nrgba(76, 175, 80); tg = "✓ Active" }
+	dotC := n(158)
+	if j.IsCurrent { dotC = n(33) }
 
 	return c.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return layout.Inset{Top: unit.Dp(10), Bottom: unit.Dp(10), Left: unit.Dp(14), Right: unit.Dp(14)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					gtx.Constraints.Min.X = gtx.Dp(20)
 					l := material.Label(u.th, unit.Sp(16), "●")
-					l.Color = dc
+					l.Color = dotC
 					return l.Layout(gtx)
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							l := material.Label(u.th, unit.Sp(14), fmt.Sprintf("JDK %s  %s", j.Version, j.Vendor))
-							l.Font.Weight = 600
-							if j.IsCurrent { l.Color = nrgba(46, 125, 50) }
-							return l.Layout(gtx)
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									l := material.Label(u.th, unit.Sp(14), fmt.Sprintf("JDK %s", j.Version))
+									if j.IsCurrent { l.Font.Weight = 600 }
+									l.Color = n(33)
+									return l.Layout(gtx)
+								}),
+								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return u.vendorBadge(gtx, j.Vendor)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									if j.Tag == "" { return layout.Dimensions{} }
+									return u.mcBadge(gtx, j.Tag)
+								}),
+							)
 						}),
+						layout.Rigid(layout.Spacer{Height: unit.Dp(2)}.Layout),
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							l := material.Label(u.th, unit.Sp(11), j.Path)
-							l.Color = n(130)
+							path := j.Path
+							if len(path) > 65 {
+								path = "... " + path[len(path)-60:]
+							}
+							l := material.Label(u.th, unit.Sp(11), path)
+							l.Color = n(158)
 							return l.Layout(gtx)
 						}),
 					)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					if tg == "" { return layout.Dimensions{} }
-					return material.Label(u.th, unit.Sp(11), tg).Layout(gtx)
+					if j.IsCurrent { return layout.Dimensions{} }
+					mb := material.Button(u.th, c, "Switch")
+					mb.Inset = layout.Inset{Top: unit.Dp(4), Bottom: unit.Dp(4), Left: unit.Dp(12), Right: unit.Dp(12)}
+					mb.CornerRadius = unit.Dp(6)
+					return mb.Layout(gtx)
 				}),
 			)
 		})
 	})
+}
+
+// vendorBadge draws a small colored chip for the vendor name.
+func (u *UI) vendorBadge(gtx layout.Context, vendor string) layout.Dimensions {
+	bg, fg := u.chipColors(vendor)
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			paint.FillShape(gtx.Ops, bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
+			return layout.Dimensions{Size: gtx.Constraints.Max}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(8), Right: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				l := material.Label(u.th, unit.Sp(11), vendor)
+				l.Color = fg
+				return l.Layout(gtx)
+			})
+		}),
+	)
+}
+
+func (u *UI) chipColors(vendor string) (bg, fg color.NRGBA) {
+	switch vendor {
+	case "Azul Zulu":
+		return nrgba(227, 242, 253), nrgba(21, 65, 143)
+	case "Adoptium", "Eclipse Temurin":
+		return nrgba(232, 245, 233), nrgba(27, 94, 32)
+	case "Amazon Corretto":
+		return nrgba(255, 243, 224), nrgba(191, 101, 2)
+	case "GraalVM":
+		return nrgba(243, 229, 245), nrgba(74, 20, 128)
+	case "Microsoft":
+		return nrgba(227, 242, 253), nrgba(13, 71, 161)
+	case "Liberica":
+		return nrgba(232, 245, 233), nrgba(46, 125, 50)
+	default:
+		return n(245), textSec
+	}
+}
+
+// mcBadge draws a colored Minecraft compatibility tag.
+func (u *UI) mcBadge(gtx layout.Context, tag string) layout.Dimensions {
+	var bg, fg color.NRGBA
+	switch tag {
+	case "[Minecraft 1.12-]":
+		bg, fg = nrgba(253, 246, 227), nrgba(139, 103, 27)
+	case "[Minecraft 1.18-1.20]":
+		bg, fg = nrgba(232, 245, 233), nrgba(26, 122, 75)
+	case "[Minecraft 1.21+]":
+		bg, fg = nrgba(227, 242, 253), nrgba(26, 92, 168)
+	default:
+		return layout.Dimensions{}
+	}
+	return layout.Stack{}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
+			paint.FillShape(gtx.Ops, bg, clip.Rect{Max: gtx.Constraints.Max}.Op())
+			return layout.Dimensions{Size: gtx.Constraints.Max}
+		}),
+		layout.Stacked(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(2), Bottom: unit.Dp(2), Left: unit.Dp(6), Right: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				l := material.Label(u.th, unit.Sp(10), tag)
+				l.Color = fg
+				return l.Layout(gtx)
+			})
+		}),
+	)
 }
 
 func (u *UI) btns(gtx layout.Context) layout.Dimensions {
@@ -301,7 +454,7 @@ func (u *UI) btns(gtx layout.Context) layout.Dimensions {
 
 func (u *UI) st(gtx layout.Context) layout.Dimensions {
 	l := material.Label(u.th, unit.Sp(12), u.stat)
-	l.Color = n(158)
+	l.Color = u.statColor
 	return l.Layout(gtx)
 }
 
@@ -328,7 +481,7 @@ func (u *UI) drawDl(gtx layout.Context) {
 							layout.Rigid(layout.Spacer{Width: unit.Dp(8)}.Layout),
 							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 								mb := material.Button(u.th, &u.dlOk, "Download")
-								mb.Background = nrgba(25, 118, 210)
+								mb.Background = primary
 								return mb.Layout(gtx)
 							}),
 						)
@@ -352,7 +505,9 @@ func card(gtx layout.Context, w layout.Widget) layout.Dimensions {
 // ── actions ───────────────────────────────────────────
 
 func (u *UI) doScan() {
-	u.stat = "Scanning..."; u.w.Invalidate()
+	u.stat = "Scanning..."
+	u.statColor = nrgba(25, 118, 210)
+	u.w.Invalidate()
 	u.sc <- core.ScanAll(u.cfg)
 }
 
@@ -360,29 +515,34 @@ func (u *UI) doAdd() {
 	p := folder()
 	if p == "" { return }
 	v := core.ScanDirectory(p)
-	if len(v) == 0 { u.stat = "No JDK in that path"; u.w.Invalidate(); return }
+	if len(v) == 0 { u.stat = "No JDK in that path"; u.statColor = nrgba(230, 90, 26); u.w.Invalidate(); return }
 	u.cfg.AddScanPath(p)
 	u.mu.Lock()
 	u.list = append(u.list, v...)
 	u.item = make([]widget.Clickable, len(u.list))
 	u.mu.Unlock()
 	u.stat = fmt.Sprintf("Added %s", v[0].Version)
+	u.statColor = n(33)
 	u.w.Invalidate()
 }
 
 func (u *UI) doDl(ver string) {
-	u.stat = fmt.Sprintf("Downloading JDK %s ...", ver); u.w.Invalidate()
+	u.stat = fmt.Sprintf("Downloading JDK %s ...", ver)
+	u.statColor = nrgba(25, 118, 210)
+	u.w.Invalidate()
 	_, err := core.DownloadJDK(ver, u.cfg.Mirror, nil)
-	if err != nil { u.stat = "Failed: " + err.Error(); u.w.Invalidate(); return }
+	if err != nil { u.stat = "Failed: " + err.Error(); u.statColor = nrgba(230, 90, 26); u.w.Invalidate(); return }
 	u.stat = fmt.Sprintf("Downloaded JDK %s", ver)
+	u.statColor = n(33)
 	go u.doScan()
 }
 
 func (u *UI) doSw() {
-	if u.sel < 0 || u.sel >= len(u.list) { u.stat = "Select a JDK first"; u.w.Invalidate(); return }
+	if u.sel < 0 || u.sel >= len(u.list) { u.stat = "Select a JDK first"; u.statColor = nrgba(230, 90, 26); u.w.Invalidate(); return }
 	j := u.list[u.sel]
-	if j.IsCurrent { u.stat = "Already active"; u.w.Invalidate(); return }
-	u.stat = "Requesting admin..."; u.w.Invalidate()
+	if j.IsCurrent { u.stat = "Already active"; u.statColor = n(158); u.w.Invalidate(); return }
+	u.stat = "Requesting admin..."
+	u.statColor = nrgba(25, 118, 210)
 
 	e, _ := os.Executable()
 	a := fmt.Sprintf(`--switch "%s"`, j.Path)
