@@ -70,6 +70,11 @@ static int        g_dl_ver       = 17;
 static float      g_dl_progress  = 0;
 static int        g_dl_running   = 0;        /* download thread active */
 
+static ToolList  *g_rust         = NULL;
+static ToolList  *g_node         = NULL;
+static int        g_rust_sel     = -1;
+static int        g_node_sel     = -1;
+
 static HFONT      g_hFontLg=NULL, g_hFontB=NULL, g_hFont=NULL, g_hFontSm=NULL;
 
 /* ================================================================
@@ -151,13 +156,17 @@ static void set_status_clr(COLORREF c, const wchar_t *fmt, ...) {
 /* ================================================================
    Scrollbar helper
    ================================================================ */
+
+static int current_item_count(void);
+static int current_list_sel(void);
+static void current_list_set_sel(int idx);
+
 /* tracks first visible item; callers update g_first_vis then call
    fix_scroll() to clamp it back into range */
 static void fix_scroll(void) {
-    if (!g_jdks) { g_first_vis=0; return; }
+    if (current_item_count() <= 0) { g_first_vis=0; return; }
     if (g_first_vis < 0) g_first_vis = 0;
-    /* g_max_vis is set by the paint caller before fix_scroll */
-    int total = g_jdks->count;
+    int total = current_item_count();
     if (total <= g_max_vis) g_first_vis = 0;
     else if (g_first_vis > total - g_max_vis) g_first_vis = total - g_max_vis;
 }
@@ -167,7 +176,6 @@ static void scroll_by(int delta) {
 /* ================================================================
    Sidebar
    ================================================================ */
-typedef enum { NAV_JDK=0, NAV_DL, NAV_ST, NAV_CNT } NavId;
 static NavId g_nav = NAV_JDK;
 
 static void paint_sidebar(HDC hdc, int w, int h) {
@@ -184,8 +192,8 @@ static void paint_sidebar(HDC hdc, int w, int h) {
 
     fill(hdc,10,106,w-20,1,BORDER);
 
-    const wchar_t *labels[]={L"打包类",L"下载",L"设置"};
-    int ny[]={118,162,206};
+    const wchar_t *labels[]={L"打包类",L"下载",L"设置",L"Rust",L"Node.js"};
+    int ny[]={118,162,206,250,294};
     for (int i=0;i<NAV_CNT;i++) {
         int sel=(g_nav==(NavId)i);
         if (sel) { fill(hdc,10,ny[i]-3,4,24,ACCENT); fill(hdc,12,ny[i]-3,w-24,26,BG_CARD_H); }
@@ -193,37 +201,76 @@ static void paint_sidebar(HDC hdc, int w, int h) {
               sel?FG1:FG3, sel?g_hFontB:g_hFont);
     }
 
-    fill(hdc,10,248,w-20,1,BORDER);
-    txt_l(hdc,L"当前活跃",14,260,w-28,15,FG3,g_hFontSm);
+    fill(hdc,10,336,w-20,1,BORDER);
+    txt_l(hdc,L"当前活跃",14,348,w-28,15,FG3,g_hFontSm);
 
     int found=-1;
-    if (g_jdks) for (int i=0;i<g_jdks->count;i++)
+    if (g_nav==NAV_JDK && g_jdks) for (int i=0;i<g_jdks->count;i++)
         if (g_jdks->items[i]->is_current){found=i;break;}
+    else if (g_nav==NAV_RUST && g_rust) for (int i=0;i<g_rust->count;i++)
+        if (g_rust->items[i]->is_current){found=i;break;}
+    else if (g_nav==NAV_NODE && g_node) for (int i=0;i<g_node->count;i++)
+        if (g_node->items[i]->is_current){found=i;break;}
 
     if (found>=0) {
-        JDKInfo *j=g_jdks->items[found];
-        wchar_t v[64]; _snwprintf(v,_countof(v),L"JDK %S",j->version);
-        txt_l(hdc,v,14,276,w-28,22,ACCENT,g_hFontB);
-        if (j->vendor[0])
-            txt_l(hdc,mb2w(j->vendor),14,298,w-28,15,FG3,g_hFontSm);
-        wchar_t pd[MAX_PATH];
-        if (wcslen(mb2w(j->path))>26)
-            _snwprintf(pd,_countof(pd),L"...%S",j->path+(int)strlen(j->path)-23);
-        else
-            mbstowcs_s(NULL,pd,_countof(pd),j->path,_TRUNCATE);
-        txt_l(hdc,pd,14,314,w-28,15,FG3,g_hFontSm);
+        wchar_t v[128] = L"";
+        if (g_nav==NAV_JDK && g_jdks) {
+            JDKInfo *j=g_jdks->items[found];
+            _snwprintf(v,_countof(v),L"JDK %S",j->version);
+            txt_l(hdc,v,14,364,w-28,22,ACCENT,g_hFontB);
+            if (j->vendor[0])
+                txt_l(hdc,mb2w(j->vendor),14,386,w-28,15,FG3,g_hFontSm);
+            wchar_t pd[MAX_PATH];
+            if (wcslen(mb2w(j->path))>26)
+                _snwprintf(pd,_countof(pd),L"...%S",j->path+(int)strlen(j->path)-23);
+            else
+                mbstowcs_s(NULL,pd,_countof(pd),j->path,_TRUNCATE);
+            txt_l(hdc,pd,14,402,w-28,15,FG3,g_hFontSm);
+        } else if (g_nav==NAV_RUST && g_rust) {
+            ToolInfo *t=g_rust->items[found];
+            _snwprintf(v,_countof(v),L"rustc %S",t->version);
+            txt_l(hdc,v,14,364,w-28,22,ACCENT,g_hFontB);
+            if (t->channel)
+                txt_l(hdc,mb2w(t->channel),14,386,w-28,15,FG3,g_hFontSm);
+        } else if (g_nav==NAV_NODE && g_node) {
+            ToolInfo *t=g_node->items[found];
+            _snwprintf(v,_countof(v),L"v%S%S",t->version,t->is_lts?L" LTS":L"");
+            txt_l(hdc,v,14,364,w-28,22,ACCENT,g_hFontB);
+            wchar_t pd[MAX_PATH];
+            if (wcslen(mb2w(t->path))>26)
+                _snwprintf(pd,_countof(pd),L"...%S",t->path+(int)strlen(t->path)-23);
+            else
+                mbstowcs_s(NULL,pd,_countof(pd),t->path,_TRUNCATE);
+            txt_l(hdc,pd,14,386,w-28,15,FG3,g_hFontSm);
+        }
     } else {
-        txt_l(hdc,L"暂无活跃 JDK",14,276,w-28,22,FG3,g_hFont);
-    }
-    if (g_jdks && g_jdks->count>0) {
-        wchar_t cnt[32]; _snwprintf(cnt,_countof(cnt),L"%d 个安装",g_jdks->count);
-        txt_l(hdc,cnt,14,h-50,w-28,15,FG3,g_hFontSm);
+        if (g_nav==NAV_JDK)
+            txt_l(hdc,L"暂无活跃 JDK",14,364,w-28,22,FG3,g_hFont);
+        else if (g_nav==NAV_RUST)
+            txt_l(hdc,L"暂无活跃 Rust",14,364,w-28,22,FG3,g_hFont);
+        else if (g_nav==NAV_NODE)
+            txt_l(hdc,L"暂无活跃 Node.js",14,364,w-28,22,FG3,g_hFont);
     }
 }
 
 /* ================================================================
    JDK List panel — with scroll support
    ================================================================ */
+
+static int current_item_count(void) {
+    if (g_nav==NAV_JDK)  return g_jdks  ? g_jdks->count  : 0;
+    if (g_nav==NAV_RUST) return g_rust  ? g_rust->count  : 0;
+    if (g_nav==NAV_NODE) return g_node  ? g_node->count  : 0;
+    return 0;
+}
+
+static int current_list_sel(void) {
+    if (g_nav==NAV_JDK)  return g_sel;
+    if (g_nav==NAV_RUST) return g_rust_sel;
+    if (g_nav==NAV_NODE) return g_node_sel;
+    return -1;
+}
+
  static void paint_jdk_list(HDC hdc, int x, int y, int w, int h) {
      fill(hdc,x,y,w,h,BG_ROOT);
     int cx=x+20, cw=w-40;
@@ -342,6 +389,184 @@ static void paint_sidebar(HDC hdc, int w, int h) {
         rrect(hdc,track_x+1,thumb_y,SBAR_W-6,thumb_h,3,RGB(0xC8,0xBF,0xAD),RGB(0xC8,0xBF,0xAD));
     } else {
         /* hidden scroll track area — reserve space so hit-testing is clean */
+        fill(hdc,cx+cw-SBAR_W,list_y,SBAR_W,list_h,BG_ROOT);
+    }
+}
+
+/* ================================================================
+   Rust List panel
+   ================================================================ */
+static void paint_rust_list(HDC hdc, int x, int y, int w, int h) {
+    fill(hdc,x,y,w,h,BG_ROOT);
+    int cx=x+20, cw=w-40;
+    int avail_w=cw-SBAR_W;
+
+    txt_l(hdc,L"已安装的 Rust 工具链",cx,y+10,avail_w,26,FG1,g_hFontLg);
+
+    int hy=y+44;
+    fill(hdc,cx,hy,avail_w,22,BG_SIDEBAR);
+    txt_l(hdc,L"工具链",  cx+8,   hy, 160, 22,FG3,g_hFontSm);
+    txt_l(hdc,L"Channel", cx+172, hy, 120, 22,FG3,g_hFontSm);
+    txt_l(hdc,L"路径",    cx+296, hy, avail_w-410, 22,FG3,g_hFontSm);
+
+    int list_y=hy+22;
+    int list_h=h-(list_y-y)-STATUS_H;
+
+    g_max_vis = list_h / ITEM_H;
+    if (g_max_vis<1) g_max_vis=1;
+    fix_scroll();
+
+    if (!g_rust || g_rust->count==0) {
+        int ey=y+(h-50)/2;
+        txt_c(hdc,L"暂无 Rust 工具链",cx,ey,avail_w,24,FG3,g_hFontB);
+        txt_c(hdc,L"请先安装 rustup: https://rustup.rs",
+              cx,ey+26,avail_w,18,FG3,g_hFontSm);
+        fill(hdc,cx+avail_w,list_y,SBAR_W,list_h,RGB(0xE8,0xE0,0xD4));
+        return;
+    }
+
+    for (int i=g_first_vis; i<g_rust->count && i<g_first_vis+g_max_vis; i++) {
+        int ry=list_y+(i-g_first_vis)*ITEM_H;
+        ToolInfo *t=g_rust->items[i];
+        int sel=(i==g_rust_sel);
+        int bg = sel ? SEL_BG : (t->is_current ? BG_CARD : BG_ROOT);
+        fill(hdc,cx,ry,avail_w,ITEM_H, bg);
+
+        COLORREF ac=t->is_current?ACCENT_OK:(sel?ACCENT:BORDER);
+        fill(hdc,cx,ry,3,ITEM_H,ac);
+        fill(hdc,cx,ry+ITEM_H-1,avail_w,1,BORDER);
+
+        /* Toolchain name (version field holds rustc output for display) */
+        txt_l(hdc,mb2w(t->channel),cx+12,ry+4,160,ITEM_H-8,
+              t->is_current?FG1:FG2, t->is_current?g_hFontB:g_hFont);
+
+        /* Channel badge */
+        if (t->channel && t->channel[0]) {
+            COLORREF vb=RGB(0xE8,0xF5,0xE9), vf=RGB(0x2E,0x7D,0x32);
+            if (strstr(t->channel,"nightly"))
+                { vb=RGB(0xFD,0xF3,0xE0); vf=RGB(0xBF,0x65,0x02); }
+            else if (strstr(t->channel,"stable"))
+                { vb=RGB(0xE8,0xF5,0xE9); vf=RGB(0x2E,0x7D,0x32); }
+            SIZE vsz; GetTextExtentPoint32W(hdc,mb2w(t->channel),(int)wcslen(mb2w(t->channel)),&vsz);
+            int vw=vsz.cx+14;
+            if (cx+172+vw < cx+avail_w-120) {
+                rrect(hdc,cx+172,ry+12,vw,26,4,vb,vb);
+                txt_c(hdc,mb2w(t->channel),cx+172,ry+12,vw,26,vf,g_hFontSm);
+            }
+        }
+
+        wchar_t pd[MAX_PATH];
+        if (wcslen(mb2w(t->path))>50)
+            _snwprintf(pd,_countof(pd),L"...%S",t->path+(int)strlen(t->path)-47);
+        else
+            mbstowcs_s(NULL,pd,_countof(pd),t->path,_TRUNCATE);
+        txt_l(hdc,pd,cx+296,ry+4,avail_w-410,ITEM_H-8,FG3,g_hFontSm);
+
+        if (!t->is_current) {
+            int sbx=cx+avail_w-86, sby=ry+(ITEM_H-28)/2;
+            rrect(hdc,sbx,sby,78,28,5,ACCENT,ACCENT);
+            txt_c(hdc,L"切换",sbx,sby,78,28,BG_CARD,g_hFont);
+        }
+    }
+
+    /* scrollbar */
+    int total = g_rust->count;
+    int need_scroll = total > g_max_vis;
+    if (need_scroll) {
+        int track_x = cx + cw - SBAR_W + 2;
+        fill(hdc,track_x,list_y,SBAR_W-4,list_h,RGB(0xE8,0xE0,0xD4));
+        stroke(hdc,track_x,list_y,SBAR_W-4,list_h,BORDER,1);
+
+        int thumb_h = (int)((double)list_h * g_max_vis / total);
+        if (thumb_h < 24) thumb_h = 24;
+        int thumb_y = list_y + (int)((double)(list_h-thumb_h) * g_first_vis / (total-g_max_vis));
+        rrect(hdc,track_x+1,thumb_y,SBAR_W-6,thumb_h,3,RGB(0xC8,0xBF,0xAD),RGB(0xC8,0xBF,0xAD));
+    } else {
+        fill(hdc,cx+cw-SBAR_W,list_y,SBAR_W,list_h,BG_ROOT);
+    }
+}
+
+/* ================================================================
+   Node.js List panel
+   ================================================================ */
+static void paint_node_list(HDC hdc, int x, int y, int w, int h) {
+    fill(hdc,x,y,w,h,BG_ROOT);
+    int cx=x+20, cw=w-40;
+    int avail_w=cw-SBAR_W;
+
+    txt_l(hdc,L"已安装的 Node.js",cx,y+10,avail_w,26,FG1,g_hFontLg);
+
+    int hy=y+44;
+    fill(hdc,cx,hy,avail_w,22,BG_SIDEBAR);
+    txt_l(hdc,L"版本",    cx+8,   hy, 120, 22,FG3,g_hFontSm);
+    txt_l(hdc,L"LTS",     cx+132, hy, 40,  22,FG3,g_hFontSm);
+    txt_l(hdc,L"路径",    cx+176, hy, avail_w-270, 22,FG3,g_hFontSm);
+
+    int list_y=hy+22;
+    int list_h=h-(list_y-y)-STATUS_H;
+
+    g_max_vis = list_h / ITEM_H;
+    if (g_max_vis<1) g_max_vis=1;
+    fix_scroll();
+
+    if (!g_node || g_node->count==0) {
+        int ey=y+(h-50)/2;
+        txt_c(hdc,L"暂无 Node.js",cx,ey,avail_w,24,FG3,g_hFontB);
+        txt_c(hdc,L"请从 https://nodejs.org 下载安装",
+              cx,ey+26,avail_w,18,FG3,g_hFontSm);
+        fill(hdc,cx+avail_w,list_y,SBAR_W,list_h,RGB(0xE8,0xE0,0xD4));
+        return;
+    }
+
+    for (int i=g_first_vis; i<g_node->count && i<g_first_vis+g_max_vis; i++) {
+        int ry=list_y+(i-g_first_vis)*ITEM_H;
+        ToolInfo *t=g_node->items[i];
+        int sel=(i==g_node_sel);
+
+        fill(hdc,cx,ry,avail_w,ITEM_H, sel?SEL_BG:(t->is_current?BG_CARD:BG_ROOT));
+
+        COLORREF ac=t->is_current?ACCENT_OK:(sel?ACCENT:BORDER);
+        fill(hdc,cx,ry,3,ITEM_H,ac);
+        fill(hdc,cx,ry+ITEM_H-1,avail_w,1,BORDER);
+
+        wchar_t ver[64];
+        _snwprintf(ver,_countof(ver),L"v%S%S",t->version,t->is_lts?L" LTS":L"");
+        txt_l(hdc,ver,cx+12,ry+4,120,ITEM_H-8,
+              t->is_current?FG1:FG2, t->is_current?g_hFontB:g_hFont);
+
+        /* LTS badge */
+        if (t->is_lts) {
+            rrect(hdc,cx+132,ry+14,36,22,4,RGB(0xE8,0xF5,0xE9),RGB(0xE8,0xF5,0xE9));
+            txt_c(hdc,L"LTS",cx+132,ry+14,36,22,RGB(0x2E,0x7D,0x32),g_hFontSm);
+        }
+
+        wchar_t pd[MAX_PATH];
+        if (wcslen(mb2w(t->path))>50)
+            _snwprintf(pd,_countof(pd),L"...%S",t->path+(int)strlen(t->path)-47);
+        else
+            mbstowcs_s(NULL,pd,_countof(pd),t->path,_TRUNCATE);
+        txt_l(hdc,pd,cx+176,ry+4,avail_w-270,ITEM_H-8,FG3,g_hFontSm);
+
+        if (!t->is_current) {
+            int sbx=cx+avail_w-86, sby=ry+(ITEM_H-28)/2;
+            rrect(hdc,sbx,sby,78,28,5,ACCENT,ACCENT);
+            txt_c(hdc,L"切换",sbx,sby,78,28,BG_CARD,g_hFont);
+        }
+    }
+
+    /* scrollbar */
+    int total = g_node->count;
+    int need_scroll = total > g_max_vis;
+    if (need_scroll) {
+        int track_x = cx + cw - SBAR_W + 2;
+        fill(hdc,track_x,list_y,SBAR_W-4,list_h,RGB(0xE8,0xE0,0xD4));
+        stroke(hdc,track_x,list_y,SBAR_W-4,list_h,BORDER,1);
+
+        int thumb_h = (int)((double)list_h * g_max_vis / total);
+        if (thumb_h < 24) thumb_h = 24;
+        int thumb_y = list_y + (int)((double)(list_h-thumb_h) * g_first_vis / (total-g_max_vis));
+        rrect(hdc,track_x+1,thumb_y,SBAR_W-6,thumb_h,3,RGB(0xC8,0xBF,0xAD),RGB(0xC8,0xBF,0xAD));
+    } else {
         fill(hdc,cx+cw-SBAR_W,list_y,SBAR_W,list_h,BG_ROOT);
     }
 }
@@ -496,14 +721,16 @@ static void on_paint(HWND hwnd) {
     fill(hdc,rx,0,rw,HDR_H,BG_HDR);
     fill(hdc,rx,HDR_H-1,rw,1,ACCENT);
 
-    const wchar_t *titles[]={L"打包类",L"下载",L"设置"};
+    const wchar_t *titles[]={L"打包类",L"下载",L"设置",L"Rust",L"Node.js"};
     txt_l(hdc,titles[g_nav],rx+20,0,rw-40,HDR_H,FG1,g_hFontB);
 
     int cy=HDR_H+1, ch=h-HDR_H-STATUS_H-1;
     switch(g_nav) {
-        case NAV_JDK: paint_jdk_list(hdc,rx,cy,rw,ch); break;
-        case NAV_DL:  paint_download(hdc,rx,cy,rw,ch);  break;
-        case NAV_ST:  paint_settings(hdc,rx,cy,rw,ch);  break;
+        case NAV_JDK:  paint_jdk_list(hdc,rx,cy,rw,ch);  break;
+        case NAV_DL:   paint_download(hdc,rx,cy,rw,ch);   break;
+        case NAV_ST:   paint_settings(hdc,rx,cy,rw,ch);   break;
+        case NAV_RUST: paint_rust_list(hdc,rx,cy,rw,ch);  break;
+        case NAV_NODE: paint_node_list(hdc,rx,cy,rw,ch);  break;
     }
 
     int sy=h-STATUS_H;
@@ -525,7 +752,11 @@ static unsigned __stdcall scan_thread(void *param) {
     if (g_jdks) jdk_list_free(g_jdks);
     g_jdks=scan_all(g_cfg?(const char**)g_cfg->scan_paths:NULL,
                     g_cfg?g_cfg->scan_paths_count:0);
-    g_sel=-1; g_first_vis=0;
+    if (g_rust) tool_list_free(g_rust);
+    g_rust=scan_rust();
+    if (g_node) tool_list_free(g_node);
+    g_node=scan_nodejs();
+    g_sel=-1; g_rust_sel=-1; g_node_sel=-1; g_first_vis=0;
     if (g_jdks && g_jdks->count>0)
         set_status_clr(ACCENT_OK,L"找到 %d 个 JDK",g_jdks->count);
     else
@@ -582,6 +813,92 @@ static void do_switch(void) {
     InvalidateRect(g_hWnd,NULL,FALSE);
 }
 
+/* ── Rust switch ──────────────────────────────────────── */
+
+static void do_switch_rust(void) {
+    if (g_rust_sel<0 || !g_rust || g_rust_sel>=g_rust->count)
+        { set_status_clr(ACCENT,L"请先选中一个 Rust 工具链"); return; }
+    ToolInfo *t=g_rust->items[g_rust_sel];
+    if (t->is_current)
+        { set_status_clr(FG3,L"已是当前工具链"); return; }
+
+    set_status_clr(ACCENT,L"正在请求管理员...");
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL,exe,MAX_PATH);
+    wchar_t args[MAX_PATH*2];
+    swprintf_s(args,MAX_PATH*2,L"--switch-rust \"%S\"",t->channel);
+    SHELLEXECUTEINFOW sei={sizeof(sei)};
+    sei.fMask=SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb=L"runas"; sei.lpFile=exe; sei.lpParameters=args; sei.nShow=SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+        { set_status_clr(ACCENT,L"UAC 被拒绝"); return; }
+
+    char rp[MAX_PATH];
+    snprintf(rp,sizeof(rp),"%s\\jvs_switch_result.json",getenv("TEMP"));
+    int ok=0;
+    for (int i=0;i<300;i++) { Sleep(200);
+        FILE *f=fopen(rp,"r");
+        if (f) {
+            char buf[4096]; size_t n=fread(buf,1,sizeof(buf)-1,f);
+            fclose(f); buf[n]='\0';
+            char *s1=strstr(buf,"\"success\""), *s2=strstr(buf,"\"true\"");
+            ok=(s1!=NULL) && (s2!=NULL);
+            DeleteFileA(rp); break;
+        }
+    }
+    if (ok) {
+        set_status_clr(ACCENT_OK,L"Rust 切换成功，重新扫描...");
+        if (g_rust) tool_list_free(g_rust);
+        g_rust=scan_rust();
+        g_rust_sel=-1; g_first_vis=0;
+    } else {
+        set_status_clr(ACCENT,L"Rust 切换失败");
+    }
+    InvalidateRect(g_hWnd,NULL,FALSE);
+}
+
+/* ── Node.js switch ───────────────────────────────────── */
+
+static void do_switch_node(void) {
+    if (g_node_sel<0 || !g_node || g_node_sel>=g_node->count)
+        { set_status_clr(ACCENT,L"请先选中一个 Node.js 版本"); return; }
+    ToolInfo *t=g_node->items[g_node_sel];
+    if (t->is_current)
+        { set_status_clr(FG3,L"已是当前版本"); return; }
+
+    set_status_clr(ACCENT,L"正在请求管理员...");
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL,exe,MAX_PATH);
+    wchar_t args[MAX_PATH*2];
+    swprintf_s(args,MAX_PATH*2,L"--switch-node \"%S\"",t->path);
+    SHELLEXECUTEINFOW sei={sizeof(sei)};
+    sei.fMask=SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb=L"runas"; sei.lpFile=exe; sei.lpParameters=args; sei.nShow=SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+        { set_status_clr(ACCENT,L"UAC 被拒绝"); return; }
+
+    char rp[MAX_PATH];
+    snprintf(rp,sizeof(rp),"%s\\jvs_switch_result.json",getenv("TEMP"));
+    int ok=0;
+    for (int i=0;i<300;i++) { Sleep(200);
+        FILE *f=fopen(rp,"r");
+        if (f) {
+            char buf[4096]; size_t n=fread(buf,1,sizeof(buf)-1,f);
+            fclose(f); buf[n]='\0';
+            char *s1=strstr(buf,"\"success\""), *s2=strstr(buf,"\"true\"");
+            ok=(s1!=NULL) && (s2!=NULL);
+            DeleteFileA(rp); break;
+        }
+    }
+    if (ok) {
+        set_status_clr(ACCENT_OK,L"Node.js 切换成功，重新扫描...");
+        if (g_node) tool_list_free(g_node);
+        g_node=scan_nodejs();
+        g_node_sel=-1; g_first_vis=0;
+    } else {
+        set_status_clr(ACCENT,L"Node.js 切换失败");
+    }
+    InvalidateRect(g_hWnd,NULL,FALSE);
+}
+
 /* ================================================================
    Hit-testing: list item at (mx,my), returns index or -1
    ================================================================ */
@@ -591,7 +908,7 @@ static int hit_list_item(int mx, int my, int *out_idx) {
     int local=my-list_y;
     if (local<0 || local>=g_max_vis*ITEM_H) return 0;
     int row=g_first_vis + local/ITEM_H;
-    if (row<0 || !g_jdks || row>=g_jdks->count) return 0;
+    if (row<0 || row>=current_item_count()) return 0;
     *out_idx=row; return 1;
 }
 
@@ -606,17 +923,18 @@ static int hit_scrollbar(int mx, int my, int *thumb_drag) {
 static int g_sbar_x=0, g_sbar_y=0, g_sbar_h=0, g_thumb_y=0, g_thumb_h=0, g_dragging=0;
 
 static void update_scrollbar_geom(void) {
-    if (!g_jdks || g_jdks->count<=g_max_vis) { g_sbar_h=0; return; }
+    int total = current_item_count();
+    if (total <= g_max_vis) { g_sbar_h=0; return; }
     int list_y=HDR_H+22;
     int rx=SIDEBAR_W+1, w=GetSystemMetrics(SM_CXSCREEN)-rx-1;
     int cw=w-40;
     RECT rc; GetClientRect(g_hWnd,&rc);
     int list_h=rc.bottom - list_y - STATUS_H;
     g_sbar_x=rx+cw-SBAR_W+2; g_sbar_y=list_y; g_sbar_h=list_h;
-    int thumb_h=(int)((double)list_h*g_max_vis/(g_jdks->count));
+    int thumb_h=(int)((double)list_h*g_max_vis/(total));
     if (thumb_h<24) thumb_h=24;
     g_thumb_h=thumb_h;
-    g_thumb_y=g_sbar_y+(int)((double)(list_h-thumb_h)*g_first_vis/(g_jdks->count-g_max_vis));
+    g_thumb_y=g_sbar_y+(int)((double)(list_h-thumb_h)*g_first_vis/(total-g_max_vis));
 }
 
 /* ================================================================
@@ -630,13 +948,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     case WM_PAINT: {
         on_paint(hwnd);
         /* update scrollbar geometry after paint */
-        if (g_nav==NAV_JDK) { update_scrollbar_geom(); }
+        if (g_nav==NAV_JDK || g_nav==NAV_RUST || g_nav==NAV_NODE) { update_scrollbar_geom(); }
         return 0; }
     case WM_SIZE: {
-        if (g_nav==NAV_JDK) { update_scrollbar_geom(); InvalidateRect(hwnd,NULL,FALSE); }
+        if (g_nav==NAV_JDK || g_nav==NAV_RUST || g_nav==NAV_NODE) { update_scrollbar_geom(); InvalidateRect(hwnd,NULL,FALSE); }
         return 0; }
     case WM_MOUSEWHEEL: {
-        if (g_nav==NAV_JDK) {
+        if (g_nav==NAV_JDK || g_nav==NAV_RUST || g_nav==NAV_NODE) {
             int delta=GET_WHEEL_DELTA_WPARAM(wParam);
             scroll_by(-delta/WHEEL_DELTA);
         }
@@ -646,7 +964,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
         if (mx<SIDEBAR_W) {
             /* sidebar nav */
-            int ny[]={118,162,206};
+            int ny[]={118,162,206,250,294};
             for (int i=0;i<NAV_CNT;i++)
                 if (my>=ny[i]-4 && my<=ny[i]+24)
                     { g_nav=(NavId)i; g_first_vis=0; InvalidateRect(hwnd,NULL,FALSE); }
@@ -657,32 +975,48 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         int cx=rx+20, cw=GetSystemMetrics(SM_CXSCREEN)-rx-1-40-SBAR_W;
 
         /* scrollbar drag */
-        if (g_nav==NAV_JDK && g_sbar_h>0 &&
+        if ((g_nav==NAV_JDK || g_nav==NAV_RUST || g_nav==NAV_NODE) && g_sbar_h>0 &&
             mx>=g_sbar_x && mx<=g_sbar_x+SBAR_W-4 &&
             my>=g_thumb_y && my<=g_thumb_y+g_thumb_h) {
             g_dragging=1; SetCapture(hwnd); return 0;
         }
 
-        if (g_nav==NAV_JDK) {
-            /* refresh button */
-            int bw=90, bh=30;
-            int bx=cx+cw-bw;
-            if (mx>=bx && mx<=bx+bw && my>=12 && my<=12+bh)
-                { start_scan(); return 0; }
+        /* ── JDK / Rust / Node list: refresh, select, switch ── */
+        if (g_nav==NAV_JDK || g_nav==NAV_RUST || g_nav==NAV_NODE) {
+            /* list type alias */
+            #define LIST_JDK  0
+            #define LIST_RUST 1
+            #define LIST_NODE 2
+            int ltype = (g_nav==NAV_RUST) ? LIST_RUST : (g_nav==NAV_NODE) ? LIST_NODE : LIST_JDK;
+
+            int *p_sel  = (ltype==LIST_RUST) ? &g_rust_sel  : (ltype==LIST_NODE) ? &g_node_sel  : &g_sel;
+            ToolList *p_list = (ltype==LIST_RUST) ? g_rust : (ltype==LIST_NODE) ? g_node : (ToolList*)g_jdks;
+            (void)p_list; /* used for refresh in full impl */
+
+            /* refresh button (JDK only) */
+            if (g_nav==NAV_JDK) {
+                int bw=90, bh=30;
+                int bx=cx+cw-bw;
+                if (mx>=bx && mx<=bx+bw && my>=12 && my<=12+bh)
+                    { start_scan(); return 0; }
+            }
 
             /* list item hit-test */
             int idx=-1;
             if (hit_list_item(mx,my,&idx)) {
-                g_sel=idx; InvalidateRect(hwnd,NULL,FALSE); return 0;
+                *p_sel=idx; InvalidateRect(hwnd,NULL,FALSE); return 0;
             }
 
-            /* switch button */
-            if (g_sel>=0) {
-                int list_y=HDR_H+22;
-                int sbx=rx+cw-86;
-                int sby=list_y+(g_sel-g_first_vis)*ITEM_H+(ITEM_H-28)/2;
-                if (mx>=sbx && mx<=sbx+78 && my>=sby && my<=sby+28)
-                    { do_switch(); return 0; }
+            /* switch button (JDK + Rust + Node) */
+            int list_y=HDR_H+22;
+            int sbx=rx+cw-86;
+            int btn_h=28, btn_w=78;
+            int *p_sel2  = (ltype==LIST_RUST) ? &g_rust_sel  : (ltype==LIST_NODE) ? &g_node_sel  : &g_sel;
+            int sby=list_y+(*p_sel2-g_first_vis)*ITEM_H+(ITEM_H-btn_h)/2;
+            if (mx>=sbx && mx<=sbx+btn_w && my>=sby && my<=sby+btn_h && *p_sel2>=0) {
+                if (g_nav==NAV_JDK)      { do_switch(); return 0; }
+                else if (g_nav==NAV_RUST) { do_switch_rust(); return 0; }
+                else if (g_nav==NAV_NODE) { do_switch_node(); return 0; }
             }
         }
 
@@ -720,7 +1054,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
         return 0; }
     case WM_LBUTTONDBLCLK: {
-        if (g_nav==NAV_JDK && g_sel>=0) do_switch();
+        if (g_nav==NAV_RUST && g_rust_sel>=0) do_switch_rust();
+        else if (g_nav==NAV_NODE && g_node_sel>=0) do_switch_node();
+        else if (g_nav==NAV_JDK && g_sel>=0) do_switch();
         return 0; }
     case WM_MOUSEMOVE: {
         int mx=GET_X_LPARAM(lParam), my=GET_Y_LPARAM(lParam);
@@ -728,8 +1064,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             int ny=my-g_thumb_h/2;
             if (ny<g_sbar_y) ny=g_sbar_y;
             if (ny+g_thumb_h>g_sbar_y+g_sbar_h) ny=g_sbar_y+g_sbar_h-g_thumb_h;
-            int new_off=(int)((double)(ny-g_sbar_y)*(g_jdks->count-g_max_vis)/(g_sbar_h-g_thumb_h));
-            if (new_off!=g_first_vis) { g_first_vis=new_off; InvalidateRect(hwnd,NULL,FALSE); }
+            int total = current_item_count();
+            if (total > g_max_vis)
+                g_first_vis=(int)((double)(ny-g_sbar_y)*(total-g_max_vis)/(g_sbar_h-g_thumb_h));
+            if (g_first_vis<0) g_first_vis=0;
+            if (g_first_vis>total-g_max_vis && total>g_max_vis) g_first_vis=total-g_max_vis;
+            InvalidateRect(hwnd,NULL,FALSE);
             return 0;
         }
         /* hand cursor on sidebar */

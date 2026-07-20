@@ -5,6 +5,10 @@
 #include "core.h"
 #include <windows.h>
 
+/* ── Navigation IDs ───────────────────────────────────── */
+
+typedef enum { NAV_JDK=0, NAV_DL, NAV_ST, NAV_RUST, NAV_NODE, NAV_CNT } NavId;
+
 /* ── Public ─────────────────────────────────────────── */
 
 int gui_run(Config *cfg);

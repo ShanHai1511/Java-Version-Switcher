@@ -62,4 +62,32 @@ int    backup_env_vars(const char *filepath);
 
 char *clean_path(const char *path, const char *old_jdk_dir, int *removed_out);
 
+/* ── Rust / Node ─────────────────────────────────────── */
+
+typedef enum { TOOL_JDK = 0, TOOL_RUST, TOOL_NODE } ToolKind;
+
+typedef struct {
+    char *version;
+    char *path;
+    int   is_current;
+    char *channel;    /* Rust: toolchain channel/name; Node: NULL */
+    int   is_lts;     /* Node: 1=LTS; Rust: 0 */
+} ToolInfo;
+
+typedef struct {
+    ToolInfo **items;
+    int        count;
+    int        cap;
+} ToolList;
+
+ToolList *scan_rust(void);
+ToolList *scan_nodejs(void);
+void      tool_list_free(ToolList *list);
+
+char *get_current_rust_channel(void);
+char *get_current_node_version(void);
+
+int switch_rust(const char *toolchain, const char *backup_file);
+int switch_nodejs(const char *version_dir, const char *backup_file);
+
 #endif /* JVS_CORE_H */
