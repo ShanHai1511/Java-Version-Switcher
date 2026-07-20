@@ -527,7 +527,16 @@ func (u *UI) doScan() {
 	u.stat = "Scanning..."
 	u.statColor = nrgba(25, 118, 210)
 	u.w.Invalidate()
-	u.sc <- core.ScanAll(u.cfg)
+	go func() {
+		result := core.ScanAll(u.cfg)
+		u.mu.Lock()
+		select {
+		case u.sc <- result:
+		default:
+			// channel 已满，丢弃旧结果
+		}
+		u.mu.Unlock()
+	}()
 }
 
 func (u *UI) doAdd() {
@@ -551,6 +560,7 @@ func (u *UI) doDl(ver string) {
 	u.w.Invalidate()
 
 	progressCh := make(chan core.DownloadProgress, 64)
+	defer close(progressCh)
 	go func() {
 		for p := range progressCh {
 			u.mu.Lock()
@@ -589,11 +599,18 @@ func (u *UI) doSw() {
 	if j.IsCurrent { u.stat = "Already active"; u.statColor = n(158); u.w.Invalidate(); return }
 	u.stat = "Requesting admin..."
 	u.statColor = nrgba(25, 118, 210)
+	u.w.Invalidate()
 
 	e, _ := os.Executable()
 	a := fmt.Sprintf(`--switch "%s"`, j.Path)
 	sw := windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteW")
-	sw.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("runas"))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(e))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(a))), 0, 0)
+	ret, _, _ := sw.Call(0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("runas"))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(e))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(a))), 0, 0)
+	if ret <= 32 {
+		u.stat = fmt.Sprintf("UAC failed (code %d)", ret)
+		u.statColor = nrgba(230, 90, 26)
+		u.w.Invalidate()
+		return
+	}
 
 	rp := core.ResultFilePath()
 	dl := time.Now().Add(60 * time.Second)
@@ -605,7 +622,10 @@ func (u *UI) doSw() {
 		time.Sleep(200e6)
 	}
 	if rs == nil { rs = &core.SwitchResult{Success: false, Error: "Timeout"} }
-	u.sc2 <- rs
+	select {
+	case u.sc2 <- rs:
+	default:
+	}
 }
 
 func folder() string {
