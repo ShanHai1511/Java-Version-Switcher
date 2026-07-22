@@ -7,7 +7,18 @@
 
 /* ── Navigation IDs ───────────────────────────────────── */
 
-typedef enum { NAV_JDK=0, NAV_DL, NAV_ST, NAV_RUST, NAV_NODE, NAV_CNT } NavId;
+typedef enum {
+    NAV_JDK = 0,
+    NAV_DL,
+    NAV_ST,
+    NAV_RUST,
+    NAV_NODE,
+    NAV_PYTHON,
+    NAV_GO,
+    NAV_MAVEN,
+    NAV_GRADLE,
+    NAV_CNT
+} NavId;
 
 /* ── Public ─────────────────────────────────────────── */
 

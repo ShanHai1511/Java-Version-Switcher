@@ -244,9 +244,9 @@ char *get_current_java_home(void) {
     return reg_read_string(HKEY_LOCAL_MACHINE, ENV_REG_PATH, "JAVA_HOME");
 }
 
-/* ── Broadcast (static helper, no nested funcs) ───────── */
+/* ── Broadcast env change ─────────────────────────────── */
 
-static int do_broadcast_env_change(void) {
+int broadcast_env_change(void) {
     typedef LRESULT (WINAPI *pSendMsgTO_t)(HWND, UINT, WPARAM, LPARAM, UINT, UINT, PULONG_PTR);
     static pSendMsgTO_t pFunc = NULL;
     static HMODULE hMod = NULL;
@@ -555,9 +555,11 @@ int restore_env_vars(const char *filepath) {
         }
     }
     fclose(f);
-    do_broadcast_env_change();
+    broadcast_env_change();
     return 0;
 }
+
+/* ── Path cleanup ───────────────────────────────────── */
 
 /* ── Path cleanup ───────────────────────────────────── */
 
@@ -681,7 +683,7 @@ SwitchResult *switch_jdk(const char *jdk_path, const char *backup_file) {
     }
     free(new_path);
 
-    if (do_broadcast_env_change() != 0) {
+    if (broadcast_env_change() != 0) {
         r->error = fmt_alloc("broadcast failed (env changed, may need restart)");
     }
 

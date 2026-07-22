@@ -57,6 +57,7 @@ char **reg_enum_subkeys(HKEY root, const char *subkey, int *out_count);
 char  *get_current_java_home(void);
 int    broadcast_env_change(void);
 int    backup_env_vars(const char *filepath);
+int    restore_env_vars(const char *filepath);
 
 /* ── Path cleanup ───────────────────────────────────── */
 
@@ -64,7 +65,7 @@ char *clean_path(const char *path, const char *old_jdk_dir, int *removed_out);
 
 /* ── Rust / Node ─────────────────────────────────────── */
 
-typedef enum { TOOL_JDK = 0, TOOL_RUST, TOOL_NODE } ToolKind;
+typedef enum { TOOL_JDK = 0, TOOL_RUST, TOOL_NODE, TOOL_PYTHON, TOOL_GO } ToolKind;
 
 typedef struct {
     char *version;
@@ -82,12 +83,57 @@ typedef struct {
 
 ToolList *scan_rust(void);
 ToolList *scan_nodejs(void);
+ToolList *scan_python(void);
+ToolList *scan_go(void);
 void      tool_list_free(ToolList *list);
 
 char *get_current_rust_channel(void);
 char *get_current_node_version(void);
+char *get_current_python_version(void);
+char *get_current_goroot(void);
 
 int switch_rust(const char *toolchain, const char *backup_file);
 int switch_nodejs(const char *version_dir, const char *backup_file);
+int switch_python(const char *version_dir, const char *backup_file);
+int switch_go(const char *goroot, const char *backup_file);
+
+int install_rust_toolchain(const char *toolchain, const char *backup_file);
+int uninstall_rust_toolchain(const char *toolchain, const char *backup_file);
+
+/* ── Maven ────────────────────────────────────────────── */
+
+typedef struct {
+    char *version;
+    char *path;
+    int   is_current;
+} MvnInfo;
+
+typedef struct {
+    MvnInfo **items;
+    int        count;
+    int        cap;
+} MvnList;
+
+MvnList *scan_maven(void);
+void     mvn_list_free(MvnList *list);
+int      switch_maven(const char *install_dir, const char *backup_file);
+
+/* ── Gradle ───────────────────────────────────────────── */
+
+typedef struct {
+    char *version;
+    char *path;
+    int   is_current;
+} GradleInfo;
+
+typedef struct {
+    GradleInfo **items;
+    int          count;
+    int          cap;
+} GradleList;
+
+GradleList *scan_gradle(void);
+void        gradle_list_free(GradleList *list);
+int         switch_gradle(const char *install_dir, const char *backup_file);
 
 #endif /* JVS_CORE_H */
